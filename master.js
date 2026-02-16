@@ -9,7 +9,7 @@ const server = http.createServer(app);
 // Socket.io setup - Srce sistema za 100k ljudi
 const io = require("socket.io")(server, {
   cors: {
-    origin: "https://keno-demo-31bf2.firebaseapp.com/", // U produkciji ovde stavi domen tvog sajta, npr: "https://tvoj-sajt.netlify.app"
+    origin: "https://keno-demo-31bf2.firebaseapp.com", // U produkciji ovde stavi domen tvog sajta, npr: "https://tvoj-sajt.netlify.app"
     methods: ["GET", "POST"]
   }
 });
