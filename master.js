@@ -257,3 +257,37 @@ server.listen(PORT, () => {
     console.log(`\n⭐ MASTER SERVER AKTIVAN NA PORTU ${PORT}`);
     runGame().catch(err => console.error("KRITIČNA GREŠKA:", err));
 });
+// Na vrhu master.js
+let roundHistory = {}; // Objekat koji čuva rezultate: { roundId: [brojevi] }
+
+// U funkciji gde završavaš kolo
+async function finishRound(roundId, finalNumbers) {
+    // Sačuvaj u memoriju servera
+    roundHistory[roundId] = finalNumbers;
+
+    // Opciono: Drži samo poslednjih 20 kola u memoriji da ne trošiš RAM
+    const historyKeys = Object.keys(roundHistory);
+    if (historyKeys.length > 20) {
+        delete roundHistory[historyKeys[0]];
+    }
+
+    // Emituj svima rezultate i istoriju
+    io.emit("roundFinished", { 
+        roundId: roundId, 
+        allNumbers: finalNumbers,
+        history: roundHistory // Šaljemo celu istoriju klijentima
+    });
+
+    // Pokreni proces isplate u bazi (ovo ostaje u bazi jer su pare u pitanju)
+    await processTickets(roundId, finalNumbers);
+}
+
+// U io.on("connection"), pošalji istoriju novom igraču
+io.on("connection", (socket) => {
+    socket.emit("initialState", {
+        roundId: currentRoundId,
+        status: currentRoundStatus,
+        history: roundHistory, // Igrač odmah dobija rezultate prošlih kola
+        // ... ostali podaci
+    });
+});
