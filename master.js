@@ -1,339 +1,261 @@
 const http = require("http");
-const admin = require("firebase-admin");
 const express = require("express");
+const admin = require("firebase-admin");
 const { Server } = require("socket.io");
-// ================= NA SAMOM VRHU FAJLA (iza require-a) =================
-let currentRoundId = Date.now(); // Inicijalizacija odmah
-let currentRoundStatus = "waiting";
+
+// ==========================================================================
+// 1. GLOBALNE VARIJABLE I KONFIGURACIJA
+// ==========================================================================
+let currentRoundId = 0;
+let currentRoundStatus = "waiting"; // "waiting", "running", "calculating"
 let drawnNumbers = [];
+let roundHistory = {}; // Čuva rezultate poslednjih kola za klijentski prikaz
+let isDrawing = false;
+let countdown = 90; // Sekunde između kola
+
 const app = express();
 const server = http.createServer(app);
 
-// Socket.io setup - Optimizovano za real-time tajmer i animacije
+// CORS podešavanja za stabilnu vezu sa lokalnim i remote klijentima
 const io = new Server(server, {
     cors: {
-        origin: "*", // Dozvoljava svim originima, rešava CORS probleme sa kosom crtom
+        origin: "*", 
         methods: ["GET", "POST"]
     }
 });
-// U io.on("connection"), pošalji istoriju novom igraču
-io.on("connection", (socket) => {
-    socket.emit("initialState", {
-        roundId: currentRoundId,
-        status: currentRoundStatus,
-        history: roundHistory, // Igrač odmah dobija rezultate prošlih kola
-        // ... ostali podaci
-    });
-});
+
+// ==========================================================================
+// 2. FIREBASE ADMIN SETUP
+// ==========================================================================
 let serviceAccount;
-
-// 1. FIREBASE ADMIN SETUP
-if (process.env.FIREBASE_CONFIG_JSON) {
-    try {
+try {
+    if (process.env.FIREBASE_CONFIG_JSON) {
         serviceAccount = JSON.parse(process.env.FIREBASE_CONFIG_JSON);
-        if (serviceAccount.private_key) {
-            serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
-        }
-        console.log("✅ Firebase učitan preko Environment Varijable.");
-    } catch (err) {
-        console.error("❌ Greška pri parsiranju FIREBASE_CONFIG_JSON:", err.message);
-    }
-} else {
-    try {
+    } else {
         serviceAccount = require("./serviceAccountKey.json");
-        console.log("✅ Firebase učitan preko lokalnog fajla.");
-    } catch (err) {
-        console.log("⚠️ Nije pronađen serviceAccountKey.json!");
     }
+
+    if (!admin.apps.length) {
+        admin.initializeApp({
+            credential: admin.credential.cert(serviceAccount),
+            databaseURL: "https://keno-demo-31bf2-default-rtdb.europe-west1.firebasedatabase.app"
+        });
+    }
+} catch (error) {
+    console.error("KRITIČNA GREŠKA: Firebase nije inicijalizovan!", error);
 }
 
-if (serviceAccount && !admin.apps.length) {
-    admin.initializeApp({
-        credential: admin.credential.cert(serviceAccount),
-        databaseURL: "https://keno-demo-31bf2-default-rtdb.europe-west1.firebasedatabase.app"
-    });
-}
+const db = admin.database();
 
-const db = admin.database(); // OVO MORA BITI DEFINISANO DA BI 'db' RADILO
-const roundRef = db.ref("currentRound");
+// ==========================================================================
+// 3. ISPLATNA TABELA (PAYTABLE) I RTP PARAMETRI
+// ==========================================================================
+const RTP_TARGET = 0.70; // Ciljani povrat igračima je 70%
 
-// 2. KONSTANTE
-const WAIT_TIME_SECONDS = 90; // 90 sekundi
-const WAIT_TIME_MS = WAIT_TIME_SECONDS * 1000;
-const DRAW_INTERVAL = 4000;
 const KENO_PAYTABLE = {
-    1: { 1: 3.5 },
-    2: { 1: 1, 2: 14 },
-    3: { 2: 2, 3: 65 },
-    4: { 2: 1, 3: 10, 4: 275 },
-    5: { 3: 3, 4: 45, 5: 1350 },
-    6: { 3: 2, 4: 12, 5: 150, 6: 6500 },
-    7: { 4: 5, 5: 45, 6: 800, 7: 25000 },
-    8: { 4: 2, 5: 15, 6: 150, 7: 2500, 8: 100000 },
-    9: { 5: 10, 6: 60, 7: 800, 8: 12000, 9: 250000 },
-    10: { 5: 5, 6: 30, 7: 250, 8: 2500, 9: 35000, 10: 1000000 }
+    10: 10000, 9: 2000, 8: 500, 7: 100, 
+    6: 25, 5: 5, 4: 2, 3: 0, 2: 0, 1: 0, 0: 0
 };
 
-// 3. SOCKET UPRAVLJANJE KORISNICIMA
-io.on("connection", (socket) => {
-    console.log(`🔌 Igrač povezan: ${socket.id}`);
+// ==========================================================================
+// 4. RTP LOGIKA - KONTROLA IZVLAČENJA
+// ==========================================================================
 
-    // Čim se poveže, šaljemo mu trenutno stanje direktno iz memorije/baze
-    roundRef.once("value").then(snap => {
-        socket.emit("initialState", snap.val());
-    });
-});
+/**
+ * Simulira isplatu za potencijalni broj i vraća procenat rizika.
+ * Pomaže serveru da odluči da li da izvuče određenu lopticu.
+ */
+async function calculatePotentialPayout(proposedBall, currentBalls, roundId) {
+    const snapshot = await db.ref("tickets").orderByChild("roundId").equalTo(roundId).once("value");
+    if (!snapshot.exists()) return 0;
 
-// 4. POMOĆNE FUNKCIJE
-async function getNextRoundId() {
-    const snap = await db.ref("lastRoundId").get();
-    let nextId = (snap.val() || 1000) + 1;
-    await db.ref("lastRoundId").set(nextId);
-    return nextId;
+    const tickets = snapshot.val();
+    let totalPotentialPayout = 0;
+    let totalBets = 0;
+
+    const testDrawn = [...currentBalls, proposedBall];
+
+    for (const id in tickets) {
+        const t = tickets[id];
+        totalBets += t.amount;
+        const hits = t.numbers.filter(n => testDrawn.includes(n)).length;
+        const win = t.amount * (KENO_PAYTABLE[hits] || 0);
+        totalPotentialPayout += win;
+    }
+
+    return { payout: totalPotentialPayout, bets: totalBets };
 }
 
-// U master.js dodaj ovu funkciju za proveru svih "pending" tiketa
 /**
- * Glavna funkcija za proveru tiketa i isplatu novca
- * Poziva se odmah nakon izvlačenja 20. loptice
+ * Bira "najbolju" lopticu koja održava RTP unutar granica.
  */
-async function processTickets(roundId, drawnNumbers) {
-    console.log(`\n[OBRAČUN] Pokretanje za kolo: ${roundId}`);
-    
-    try {
-        // 1. Pristup tabeli sa tiketima
-        const ticketsRef = db.ref("tickets");
+async function getSmartBall(currentDrawn, roundId) {
+    let bestBall = null;
+    let safestBall = null;
+    let minPayout = Infinity;
+
+    // Pokušavamo da nađemo lopticu u 10 nasumičnih pokušaja radi performansi
+    for (let i = 0; i < 15; i++) {
+        let candidate = Math.floor(Math.random() * 80) + 1;
+        if (currentDrawn.includes(candidate)) continue;
+
+        const { payout, bets } = await calculatePotentialPayout(candidate, currentDrawn, roundId);
         
-        // 2. Uzmi samo tikete koji su uplaćeni za ovo specifično kolo
-        const snapshot = await ticketsRef
-            .orderByChild("roundId")
-            .equalTo(roundId)
-            .once("value");
+        // Ako je isplata manja od 70% uloga, to je savršena loptica
+        if (bets > 0 && (payout / bets) <= RTP_TARGET) {
+            return candidate; 
+        }
+
+        // Pratimo koja loptica bar najmanje isplaćuje ako su sve "skupe"
+        if (payout < minPayout) {
+            minPayout = payout;
+            safestBall = candidate;
+        }
+    }
+    
+    return safestBall || Math.floor(Math.random() * 80) + 1;
+}
+
+// ==========================================================================
+// 5. PROCESUIRANJE TIKETA I ISPLATA
+// ==========================================================================
+
+async function processTickets(roundId, finalNumbers) {
+    console.log(`\n--- ZAPOČET OBRAČUN TIKETA ZA KOLO ${roundId} ---`);
+    try {
+        const ticketsRef = db.ref("tickets");
+        const snapshot = await ticketsRef.orderByChild("roundId").equalTo(roundId).once("value");
 
         if (!snapshot.exists()) {
-            console.log(`[OBRAČUN] Nema uplaćenih tiketa za kolo ${roundId}.`);
+            console.log("Nema uplaćenih tiketa za ovo kolo.");
             return;
         }
 
         const tickets = snapshot.val();
         const updates = {};
+        let totalPaidOut = 0;
 
-        // 3. Prolazak kroz svaki tiket u bazi
         for (const ticketId in tickets) {
             const ticket = tickets[ticketId];
-
-            // Obrađujemo samo tikete koji još čekaju (status: pending)
             if (ticket.status !== "pending") continue;
 
-            // 4. Izračunaj broj pogodaka
-            const hits = ticket.numbers.filter(num => drawnNumbers.includes(num)).length;
-            
-            // 5. DEFINICIJA KVOTA (Primer: keno 10/20)
-            // hits: kvota (npr. 5 pogodaka množi ulog sa 5)
-            const paytable = {
-                10: 10000, 9: 2000, 8: 500, 7: 100, 
-                6: 25, 5: 5, 4: 2, 3: 0, 2: 0, 1: 0, 0: 0
-            };
-
-            const multiplier = paytable[hits] || 0;
+            const hits = ticket.numbers.filter(num => finalNumbers.includes(num)).length;
+            const multiplier = KENO_PAYTABLE[hits] || 0;
             const winAmount = Math.floor(ticket.amount * multiplier);
 
-            // 6. Pripremi podatke za masovni update u bazi
             const finalStatus = winAmount > 0 ? "won" : "lost";
-            
+
             updates[`/tickets/${ticketId}/status`] = finalStatus;
             updates[`/tickets/${ticketId}/winAmount`] = winAmount;
             updates[`/tickets/${ticketId}/hitsCount`] = hits;
 
-            // 7. ISPLATA NA BALANS (Ako je tiket dobitan)
             if (winAmount > 0) {
-                const userBalanceRef = db.ref(`users/${ticket.userId}/balance`);
-                
-                // Koristimo transaction da osiguramo preciznost balansa
-                await userBalanceRef.transaction((currentBalance) => {
-                    return (currentBalance || 0) + winAmount;
-                });
-                
-                console.log(`[ISPLATA] Korisnik ${ticket.userId}: +${winAmount} RSD (Pogodaka: ${hits})`);
+                const balanceRef = db.ref(`users/${ticket.userId}/balance`);
+                await balanceRef.transaction(current => (current || 0) + winAmount);
+                totalPaidOut += winAmount;
             }
         }
 
-        // 8. Jednim potezom ažuriraj sve statuse tiketa u Firebase-u
         await db.ref().update(updates);
-        console.log(`[OBRAČUN] Kolo ${roundId} je uspešno procesuirano.\n`);
+        console.log(`Obračun završen. Ukupno isplaćeno: ${totalPaidOut} RSD`);
 
     } catch (error) {
-        console.error("[GREŠKA] Problem tokom obračuna tiketa:", error);
+        console.error("GREŠKA TOKOM PROCESUIRANJA TIKETA:", error);
     }
 }
 
-function sleep(ms) { return new Promise(res => setTimeout(res, ms)); }
+// ==========================================================================
+// 6. GLAVNI CIKLUS IGRE (GAME LOOP)
+// ==========================================================================
 
-// 5. GLAVNA LOGIKA IGRE
-async function runGame() {
-    console.log("🚀 Keno Master Start...");
-
+async function runGameCycle() {
     while (true) {
-        let roundId = await getNextRoundId();
-        let endTime = Date.now() + WAIT_TIME_MS;
+        // --- FAZA 1: ČEKANJE (ODBROJAVANJE) ---
+        currentRoundId = Date.now();
+        currentRoundStatus = "waiting";
+        drawnNumbers = [];
+        countdown = 90;
 
-        // --- KORAK 1: WAITING FAZA ---
-        let roundData = {
-            roundId: roundId,
-            status: "waiting",
-            endTime: endTime,
-            drawnNumbers: [],
-            drawnAnimated: []
-        };
-        await roundRef.set(roundData);
+        console.log(`\nNovo kolo započeto: ${currentRoundId}`);
 
-        console.log(`🔹 Kolo ${roundId}: Počela uplata.`);
-
-        // TAJMER PETLJA: Emituje svake sekunde preko Socketa
-        for (let s = WAIT_TIME_SECONDS; s >= 0; s--) {
+        while (countdown > 0) {
             io.emit("roundUpdate", {
-                roundId: roundId,
+                roundId: currentRoundId,
                 status: "waiting",
-                timeLeft: s,
-                totalTime: WAIT_TIME_SECONDS
+                timeLeft: countdown,
+                history: roundHistory // Šaljemo istoriju klijentu za zlatne brojeve
             });
-            await sleep(1000);
+            await new Promise(r => setTimeout(r, 1000));
+            countdown--;
         }
 
-        // --- KORAK 2: RUNNING FAZA (IZVLAČENJE) ---
-        await roundRef.update({ status: "running" });
-        io.emit("roundUpdate", { status: "running", roundId: roundId });
-        console.log(`🔴 Kolo ${roundId}: Izvlačenje!`);
+        // --- FAZA 2: IZVLAČENJE LOPTICA ---
+        currentRoundStatus = "running";
+        io.emit("roundUpdate", { roundId: currentRoundId, status: "running", timeLeft: 0 });
 
-        let drawn = [];
         for (let i = 0; i < 20; i++) {
-            let n;
-            do { n = Math.floor(Math.random() * 80) + 1; } while (drawn.includes(n));
-            drawn.push(n);
+            let ball;
+            // Prvih 10 loptica su totalno random, ostalih 10 server "pazi" na profit
+            if (i < 10) {
+                do {
+                    ball = Math.floor(Math.random() * 80) + 1;
+                } while (drawnNumbers.includes(ball));
+            } else {
+                ball = await getSmartBall(drawnNumbers, currentRoundId);
+            }
 
-            // Ažuriraj bazu (za one koji tek uđu na sajt)
-            await roundRef.update({ drawnAnimated: drawn });
-
-            // SOCKET EMIT: Šalje lopticu klijentu ZA ANIMACIJU
-            io.emit("ballDrawn", {
-                number: n,
-                allDrawn: drawn,
-                index: i // Šaljemo index 0-19 da klijent zna kad da očisti grid
-            });
-
-            console.log(`Loptica ${i + 1}: ${n}`);
-            await sleep(DRAW_INTERVAL);
+            drawnNumbers.push(ball);
+            io.emit("ballDrawn", { number: ball, allDrawn: drawnNumbers });
+            console.log(`Loptica ${i + 1}: ${ball}`);
+            await new Promise(r => setTimeout(r, 3000)); // Razmak između loptica
         }
 
-        // --- KORAK 3: OBRAČUN ---
-        await roundRef.update({ status: "calculating", drawnNumbers: drawn });
-        io.emit("roundUpdate", { status: "calculating", roundId: roundId });
+        // --- FAZA 3: FINIŠIRANJE I ISTORIJA ---
+        currentRoundStatus = "calculating";
+        
+        // Čuvamo rezultate u istoriju za klijentski prikaz
+        roundHistory[currentRoundId] = [...drawnNumbers];
+        
+        // Limitiramo istoriju na 20 unosa radi memorije
+        const hKeys = Object.keys(roundHistory);
+        if (hKeys.length > 20) delete roundHistory[hKeys[0]];
 
-        await processTickets(roundId, drawn);
-
-        // Arhiviranje
-        await db.ref(`roundsHistory/${roundId}`).set({
-            roundId,
-            drawnNumbers: drawn,
-            createdAt: Date.now()
-        });
-
-        io.emit("roundFinished", { roundId: roundId });
-        console.log(`✅ Kolo ${roundId} završeno.`);
-        await sleep(10000); // 10s pauze pre novog kola
-
-        // U master.js (na kraju runde)
+        // Obaveštavamo klijente i šaljemo osveženu istoriju
         io.emit("roundFinished", {
             roundId: currentRoundId,
-            allNumbers: finalDrawnNumbers
+            allNumbers: drawnNumbers,
+            history: roundHistory
         });
-// Negde u tvojoj keno logici...
-console.log("Izvlačenje završeno!");
 
-// Prvo pošalji klijentima da je gotovo
-io.emit("roundFinished", { roundId: currentRoundId, allNumbers: drawnNumbers });
+        // Isplata dobitaka
+        await processTickets(currentRoundId, drawnNumbers);
 
-
-
-// Nakon toga pripremi sve za novo kolo
-// currentRoundId = Date.now(); ... itd.
-        // Pozovi funkciju za Firebase obračun
-        processTickets(currentRoundId, finalDrawnNumbers);
+        // Kratka pauza pre nego što sve krene ispočetka
+        await new Promise(r => setTimeout(r, 10000));
     }
 }
 
-// 6. SERVER START
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-    console.log(`\n⭐ MASTER SERVER AKTIVAN NA PORTU ${PORT}`);
-    runGame().catch(err => console.error("KRITIČNA GREŠKA:", err));
-});
-// Na vrhu master.js
-let roundHistory = {}; // Objekat koji čuva rezultate: { roundId: [brojevi] }
+// ==========================================================================
+// 7. SERVER LISTEN I SOCKET KONEKCIJA
+// ==========================================================================
 
-// U funkciji gde završavaš kolo
-async function finishRound(roundId, finalNumbers) {
-    // Sačuvaj u memoriju servera
-    roundHistory[roundId] = finalNumbers;
-
-    // Opciono: Drži samo poslednjih 20 kola u memoriji da ne trošiš RAM
-    const historyKeys = Object.keys(roundHistory);
-    if (historyKeys.length > 20) {
-        delete roundHistory[historyKeys[0]];
-    }
-
-    // Emituj svima rezultate i istoriju
-    io.emit("roundFinished", { 
-        roundId: roundId, 
-        allNumbers: finalNumbers,
-        history: roundHistory // Šaljemo celu istoriju klijentima
+io.on("connection", (socket) => {
+    console.log(`Klijent povezan: ${socket.id}`);
+    
+    // Slanje trenutnog stanja čim se klijent zakači
+    socket.emit("initialState", {
+        roundId: currentRoundId,
+        status: currentRoundStatus,
+        timeLeft: countdown,
+        drawnNumbers: drawnNumbers,
+        history: roundHistory
     });
+});
 
-    // Pokreni proces isplate u bazi (ovo ostaje u bazi jer su pare u pitanju)
-    await processTickets(roundId, finalNumbers);
-}
-
-
-async function finalizeRound() {// Na vrhu master.js (pobrini se da ove varijable postoje globalno)
-let currentRoundId = Date.now();
-let drawnNumbers = []; // Niz u koji dodaješ loptice jednu po jednu
-let roundHistory = {}; 
-
-async function finalizeRound() {
-    try {
-        // PROVERA: Koristi ime varijable koja STVARNO sadrži 20 brojeva.
-        // Ako si u kodu koristio finalDrawnNumbers, promeni to u drawnNumbers.
-        
-        const finalNumbersForProcessing = [...drawnNumbers]; // Kopiramo niz izvucenih brojeva
-
-        // 1. Sačuvaj u istoriju za "zlatne brojeve" na klijentu
-        roundHistory[currentRoundId] = finalNumbersForProcessing;
-
-        // Ograniči istoriju na 15 kola
-        const keys = Object.keys(roundHistory);
-        if (keys.length > 15) delete roundHistory[keys[0]];
-
-        // 2. Emituj klijentima da je gotovo
-        io.emit("roundFinished", { 
-            roundId: currentRoundId, 
-            allNumbers: finalNumbersForProcessing,
-            history: roundHistory 
-        });
-
-        console.log(`[MASTER] Kolo ${currentRoundId} završeno. Brojevi: ${finalNumbersForProcessing}`);
-
-        // 3. POZIV FUNKCIJE ZA OBRAČUN TIKETA
-        // Ovde je verovatno bila greška - prosledi ispravnu varijablu
-        await processTickets(currentRoundId, finalNumbersForProcessing);
-
-        // 4. Resetuj sve za novo kolo
-        setTimeout(() => {
-            currentRoundId = Date.now();
-            drawnNumbers = [];
-            // startNewRound(); // tvoja funkcija za početak novog kola
-        }, 5000);
-
-    } catch (error) {
-        console.error("GREŠKA U finalizeRound:", error);
-    }
-}}
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, "0.0.0.0", () => {
+    console.log(`\n🚀 KENO MASTER SERVER POKRENUT`);
+    console.log(`📍 Port: ${PORT}`);
+    console.log(`💰 Ciljani RTP: ${RTP_TARGET * 100}%`);
+    runGameCycle(); // Pokrećemo beskonačnu petlju igre
+});
