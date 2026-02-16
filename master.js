@@ -201,15 +201,21 @@ async function runGame() {
 }
 
 // ================= SOCKET KONEKCIJA =================
-io.on("connection", (socket) => {
+// Unutar io.on("connection", (socket) => { ... })
+socket.on("connection", (socket) => {
+    console.log(`Klijent povezan: ${socket.id}`);
+
+    // Šaljemo sve što klijentu treba za "hladni start"
     socket.emit("initialState", {
         roundId: currentRoundId,
-        status: currentRoundStatus,
-        history: roundHistory,
-        drawnNumbers: drawnNumbers
+        status: currentRoundStatus, // "waiting" ili "running"
+        timeLeft: countdown,        // Sinhronizovan tajmer
+        drawnNumbers: drawnNumbers, // Brojevi koji su VEĆ izašli u ovoj rundi
+        history: roundHistory,      // Rezultati prethodnih kola za .hit klasu
+        jackpot: currentJackpot,    // Pretpostavka da imaš ovu varijablu
+        bonus: currentBonus         // Pretpostavka da imaš ovu varijablu
     });
 });
-
 // ================= START =================
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
