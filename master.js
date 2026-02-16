@@ -9,7 +9,7 @@ let currentRoundStatus = "waiting";
 let drawnNumbers = [];
 let roundHistory = {}; 
 let isDrawing = false;
-
+let countdown = 90; // DODAJ OVU LINIJU OVDE (Globalno)
 const app = express();
 const server = http.createServer(app);
 
