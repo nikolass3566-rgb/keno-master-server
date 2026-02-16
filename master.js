@@ -202,7 +202,7 @@ async function runGame() {
 
 // ================= SOCKET KONEKCIJA =================
 // Unutar io.on("connection", (socket) => { ... })
-socket.on("connection", (socket) => {
+io.on("connection", (socket) => { 
     console.log(`Klijent povezan: ${socket.id}`);
 
     // Šaljemo sve što klijentu treba za "hladni start"
