@@ -106,6 +106,43 @@ io.on("connection", (socket) => {
         // Ako je pauza, pošalji prošle brojeve, ako je izvlačenje, pošalji trenutne
         drawnNumbers: currentRoundStatus === "waiting" ? lastRoundNumbers : drawnNumbers
     });
+    // master.js - Unutar io.on("connection", (socket) => { ... })
+
+socket.on("placeTicket", async (data) => {
+    const { userId, numbers, amount, roundId } = data;
+
+    try {
+        // 1. Provera balansa u Firebase-u
+        const userRef = db.ref(`users/${userId}`);
+        const userSnap = await userRef.once("value");
+        const userData = userSnap.val();
+
+        if (!userData || (userData.balance < amount)) {
+            return socket.emit("ticketError", "Nemaš dovoljno novca na računu!");
+        }
+
+        // 2. Oduzmi novac (Ovo je sigurno jer server kontroliše)
+        const newBalance = userData.balance - amount;
+        await userRef.update({ balance: newBalance });
+
+        // 3. UPIŠI TIKET U GLOBALNU LISTU (Ovo aktivira loadUserTickets kod klijenta)
+        const newTicketRef = db.ref(`tickets`).push();
+        await newTicketRef.set({
+            userId: userId,
+            numbers: numbers,
+            amount: amount,
+            roundId: roundId,
+            status: "pending",
+            createdAt: Date.now()
+        });
+
+        console.log(`[UPLATA] Korisnik ${userId} uplatio ${amount} RSD za kolo ${roundId}`);
+
+    } catch (err) {
+        console.error("Greška pri uplati:", err);
+        socket.emit("ticketError", "Serverska greška pri obradi tiketa.");
+    }
+});
 });
 
 const PORT = process.env.PORT || 3000;
