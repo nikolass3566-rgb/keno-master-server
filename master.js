@@ -271,7 +271,8 @@ const server = http.createServer((req, res) => {
     res.setHeader('Content-Type', 'text/plain');
     res.end('Keno Master is running...');
 });
-
+// Dodaj ovu liniju pre server.listen
+const port = process.env.PORT || 10000;
 server.listen(port, () => {
     console.log(`Keep-alive server running on port ${port}`);
 });
