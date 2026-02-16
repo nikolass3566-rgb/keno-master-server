@@ -5,7 +5,7 @@ const { Server } = require("socket.io");
 
 const app = express();
 const server = http.createServer(app);
-
+const db = admin.database(); // OVO MORA BITI DEFINISANO DA BI 'db' RADILO
 // Socket.io setup - Optimizovano za real-time tajmer i animacije
 const io = new Server(server, {
     cors: {
@@ -43,7 +43,7 @@ if (serviceAccount && !admin.apps.length) {
     });
 }
 
-const db = admin.database();
+
 const roundRef = db.ref("currentRound");
 
 // 2. KONSTANTE
@@ -82,56 +82,78 @@ async function getNextRoundId() {
 }
 
 // U master.js dodaj ovu funkciju za proveru svih "pending" tiketa
+/**
+ * Glavna funkcija za proveru tiketa i isplatu novca
+ * Poziva se odmah nakon izvlačenja 20. loptice
+ */
 async function processTickets(roundId, drawnNumbers) {
-    console.log(`Započinjem obračun za kolo: ${roundId}`);
+    console.log(`\n[OBRAČUN] Pokretanje za kolo: ${roundId}`);
+    
+    try {
+        // 1. Pristup tabeli sa tiketima
+        const ticketsRef = db.ref("tickets");
+        
+        // 2. Uzmi samo tikete koji su uplaćeni za ovo specifično kolo
+        const snapshot = await ticketsRef
+            .orderByChild("roundId")
+            .equalTo(roundId)
+            .once("value");
 
-    const ticketsRef = db.ref("tickets");
-    // Uzmi sve tikete koji čekaju (pending) i pripadaju ovom kolu
-    const snapshot = await ticketsRef.orderByChild("roundId").equalTo(roundId).once("value");
-
-    if (!snapshot.exists()) {
-        console.log("Nema tiketa za obračun u ovom kolu.");
-        return;
-    }
-
-    const tickets = snapshot.val();
-    const updates = {};
-
-    for (const key in tickets) {
-        const ticket = tickets[key];
-        if (ticket.status !== "pending") continue;
-
-        // Izbroj pogotke
-        const hits = ticket.numbers.filter(num => drawnNumbers.includes(num)).length;
-
-        // IZRAČUNAJ DOBITAK (Ovo je tvoja logika kvota)
-        // Primer: kvota je (broj pogodaka * 2) - prilagodi svojim pravilima
-        let winAmount = 0;
-        if (hits >= 1) {
-            // Primer proste logike: fiksne kvote ili množioci
-            const odds = [0, 2, 5, 10, 20, 50, 100, 500, 1000, 5000, 10000]; // Kvote za 0 do 10 pogodaka
-            winAmount = ticket.amount * (odds[hits] || 0);
+        if (!snapshot.exists()) {
+            console.log(`[OBRAČUN] Nema uplaćenih tiketa za kolo ${roundId}.`);
+            return;
         }
 
-        const status = winAmount > 0 ? "won" : "lost";
+        const tickets = snapshot.val();
+        const updates = {};
 
-        // Pripremi update za tiket
-        updates[`/tickets/${key}/status`] = status;
-        updates[`/tickets/${key}/winAmount`] = winAmount;
+        // 3. Prolazak kroz svaki tiket u bazi
+        for (const ticketId in tickets) {
+            const ticket = tickets[ticketId];
 
-        // Ako je dobitan, dodaj novac korisniku odmah
-        if (winAmount > 0) {
-            const userBalanceRef = db.ref(`users/${ticket.userId}/balance`);
-            await userBalanceRef.transaction((currentBalance) => {
-                return (currentBalance || 0) + winAmount;
-            });
-            console.log(`Korisnik ${ticket.userId} dobio ${winAmount} RSD`);
+            // Obrađujemo samo tikete koji još čekaju (status: pending)
+            if (ticket.status !== "pending") continue;
+
+            // 4. Izračunaj broj pogodaka
+            const hits = ticket.numbers.filter(num => drawnNumbers.includes(num)).length;
+            
+            // 5. DEFINICIJA KVOTA (Primer: keno 10/20)
+            // hits: kvota (npr. 5 pogodaka množi ulog sa 5)
+            const paytable = {
+                10: 10000, 9: 2000, 8: 500, 7: 100, 
+                6: 25, 5: 5, 4: 2, 3: 0, 2: 0, 1: 0, 0: 0
+            };
+
+            const multiplier = paytable[hits] || 0;
+            const winAmount = Math.floor(ticket.amount * multiplier);
+
+            // 6. Pripremi podatke za masovni update u bazi
+            const finalStatus = winAmount > 0 ? "won" : "lost";
+            
+            updates[`/tickets/${ticketId}/status`] = finalStatus;
+            updates[`/tickets/${ticketId}/winAmount`] = winAmount;
+            updates[`/tickets/${ticketId}/hitsCount`] = hits;
+
+            // 7. ISPLATA NA BALANS (Ako je tiket dobitan)
+            if (winAmount > 0) {
+                const userBalanceRef = db.ref(`users/${ticket.userId}/balance`);
+                
+                // Koristimo transaction da osiguramo preciznost balansa
+                await userBalanceRef.transaction((currentBalance) => {
+                    return (currentBalance || 0) + winAmount;
+                });
+                
+                console.log(`[ISPLATA] Korisnik ${ticket.userId}: +${winAmount} RSD (Pogodaka: ${hits})`);
+            }
         }
-    }
 
-    // Izvrši sve promene na tiketima odjednom
-    await db.ref().update(updates);
-    console.log("Obračun završen.");
+        // 8. Jednim potezom ažuriraj sve statuse tiketa u Firebase-u
+        await db.ref().update(updates);
+        console.log(`[OBRAČUN] Kolo ${roundId} je uspešno procesuirano.\n`);
+
+    } catch (error) {
+        console.error("[GREŠKA] Problem tokom obračuna tiketa:", error);
+    }
 }
 
 function sleep(ms) { return new Promise(res => setTimeout(res, ms)); }
