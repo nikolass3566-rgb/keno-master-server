@@ -1,279 +1,184 @@
-const http = require("http");
 const express = require("express");
-const admin = require("firebase-admin");
+const http = require("http");
 const { Server } = require("socket.io");
-
-// ======================================================
-// GLOBAL STATE
-// ======================================================
-
-let currentRoundId = 0;
-let currentRoundStatus = "waiting";
-let drawnNumbers = [];
-let roundHistory = {};
-let countdown = 90;
-
-const RTP_TARGET = 0.70;
-const TOTAL_NUMBERS = 80;
-const MAX_PICK = 10;
-const MIN_BET = 20;
-
-const KENO_PAYTABLE = {
-    10: 10000, 9: 2000, 8: 500, 7: 100,
-    6: 25, 5: 5, 4: 2, 3: 0, 2: 0, 1: 0, 0: 0
-};
+const cors = require("cors");
+const { v4: uuidv4 } = require("uuid");
 
 const app = express();
+app.use(cors());
+
 const server = http.createServer(app);
-
 const io = new Server(server, {
-    cors: { origin: "*", methods: ["GET", "POST"] }
+  cors: { origin: "*" }
 });
 
-// ======================================================
-// FIREBASE INIT
-// ======================================================
+const PORT = 3000;
 
-let serviceAccount;
-if (process.env.FIREBASE_CONFIG_JSON) {
-    serviceAccount = JSON.parse(process.env.FIREBASE_CONFIG_JSON);
-} else {
-    serviceAccount = require("./serviceAccountKey.json");
+/************************************************
+ * IN-MEMORY DATABASE (kasnije možemo SQLite)
+ ************************************************/
+
+let users = {};
+let currentRound = {
+  id: uuidv4(),
+  status: "open",
+  drawn: []
+};
+
+let tickets = {}; // roundId -> [tickets]
+
+/************************************************
+ * HELPER FUNCTIONS
+ ************************************************/
+
+function generateDraw() {
+  const numbers = [];
+  while (numbers.length < 20) {
+    const n = Math.floor(Math.random() * 80) + 1;
+    if (!numbers.includes(n)) numbers.push(n);
+  }
+  return numbers;
 }
 
-admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount),
-    databaseURL: "https://keno-demo-31bf2-default-rtdb.europe-west1.firebasedatabase.app"
-});
+function calculateMultiplier(selected, hits) {
+  const table = {
+    1: [0, 2],
+    2: [0, 1, 5],
+    3: [0, 0, 2, 10],
+    4: [0, 0, 1, 5, 20],
+    5: [0, 0, 0, 3, 15, 50],
+    6: [0, 0, 0, 2, 10, 30, 100],
+    7: [0, 0, 0, 1, 5, 20, 50, 200],
+    8: [0, 0, 0, 0, 5, 15, 40, 100, 500],
+    9: [0, 0, 0, 0, 2, 10, 30, 80, 200, 1000],
+    10: [0, 0, 0, 0, 1, 5, 20, 50, 150, 500, 2000]
+  };
+  if (!table[selected]) return 0;
+  return table[selected][hits] || 0;
+}
 
-const db = admin.database();
+/************************************************
+ * ROUND ENGINE
+ ************************************************/
 
-// ======================================================
-// RTP LOGIKA
-// ======================================================
+function startNewRound() {
+  currentRound = {
+    id: uuidv4(),
+    status: "open",
+    drawn: []
+  };
 
-async function calculatePotentialPayout(ball, currentBalls, roundId) {
-    const snap = await db.ref("tickets")
-        .orderByChild("roundId")
-        .equalTo(roundId)
-        .once("value");
+  tickets[currentRound.id] = [];
 
-    if (!snap.exists()) return { payout: 0, bets: 0 };
+  io.emit("roundStarted", currentRound);
+}
 
-    const tickets = snap.val();
-    let totalPayout = 0;
-    let totalBets = 0;
+function closeRound() {
+  currentRound.status = "drawing";
+  io.emit("roundClosed");
 
-    const testDraw = [...currentBalls, ball];
+  currentRound.drawn = generateDraw();
 
-    for (const id in tickets) {
-        const t = tickets[id];
-        totalBets += t.amount;
-        const hits = t.numbers.filter(n => testDraw.includes(n)).length;
-        totalPayout += t.amount * (KENO_PAYTABLE[hits] || 0);
+  setTimeout(() => {
+    resolveTickets();
+  }, 3000);
+}
+
+function resolveTickets() {
+  const roundTickets = tickets[currentRound.id];
+
+  roundTickets.forEach(ticket => {
+    const hits = ticket.numbers.filter(n =>
+      currentRound.drawn.includes(n)
+    ).length;
+
+    const multiplier = calculateMultiplier(ticket.numbers.length, hits);
+    const win = ticket.stake * multiplier;
+
+    if (win > 0) {
+      users[ticket.userId].balance += win;
     }
 
-    return { payout: totalPayout, bets: totalBets };
+    ticket.status = "finished";
+    ticket.hits = hits;
+    ticket.win = win;
+
+    io.to(ticket.socketId).emit("ticketResult", ticket);
+  });
+
+  io.emit("drawResult", currentRound.drawn);
+
+  setTimeout(startNewRound, 8000);
 }
 
-async function getSmartBall(currentDrawn, roundId) {
-    let safestBall = null;
-    let minPayout = Infinity;
+/************************************************
+ * SOCKET.IO
+ ************************************************/
 
-    for (let i = 0; i < 15; i++) {
-        const candidate = Math.floor(Math.random() * 80) + 1;
-        if (currentDrawn.includes(candidate)) continue;
+io.on("connection", socket => {
 
-        const { payout, bets } = await calculatePotentialPayout(candidate, currentDrawn, roundId);
+  console.log("User connected:", socket.id);
 
-        if (bets > 0 && (payout / bets) <= RTP_TARGET)
-            return candidate;
+  socket.on("register", () => {
+    const userId = uuidv4();
 
-        if (payout < minPayout) {
-            minPayout = payout;
-            safestBall = candidate;
-        }
-    }
+    users[userId] = {
+      balance: 100
+    };
 
-    return safestBall || Math.floor(Math.random() * 80) + 1;
-}
-
-// ======================================================
-// TICKET PROCESSING
-// ======================================================
-
-async function processTickets(roundId, finalNumbers) {
-    const snap = await db.ref("tickets")
-        .orderByChild("roundId")
-        .equalTo(roundId)
-        .once("value");
-
-    if (!snap.exists()) return;
-
-    const tickets = snap.val();
-    const updates = {};
-
-    for (const ticketId in tickets) {
-        const t = tickets[ticketId];
-        if (t.status !== "pending") continue;
-
-        const hits = t.numbers.filter(n => finalNumbers.includes(n)).length;
-        const multiplier = KENO_PAYTABLE[hits] || 0;
-        const winAmount = Math.floor(t.amount * multiplier);
-
-        updates[`tickets/${ticketId}/status`] = winAmount > 0 ? "won" : "lost";
-        updates[`tickets/${ticketId}/winAmount`] = winAmount;
-        updates[`tickets/${ticketId}/hitsCount`] = hits;
-
-        if (winAmount > 0) {
-            await db.ref(`users/${t.userId}/balance`)
-                .transaction(b => (b || 0) + winAmount);
-        }
-    }
-
-    await db.ref().update(updates);
-}
-
-// ======================================================
-// SOCKET LOGIKA
-// ======================================================
-
-io.on("connection", (socket) => {
-
-    console.log("Client connected:", socket.id);
-
-    socket.emit("initialState", {
-        roundId: currentRoundId,
-        status: currentRoundStatus,
-        timeLeft: countdown,
-        drawnNumbers,
-        history: roundHistory
+    socket.emit("registered", {
+      userId,
+      balance: 100
     });
+  });
 
-    // ==================================================
-    // PLACE BET (SERVER AUTHORITY)
-    // ==================================================
+  socket.on("getRound", () => {
+    socket.emit("roundData", currentRound);
+  });
 
-    socket.on("placeBet", async (data, callback) => {
+  socket.on("playTicket", data => {
 
-        try {
-            const { userId, numbers, amount } = data;
+    const { userId, numbers, stake } = data;
 
-            if (currentRoundStatus !== "waiting")
-                return callback({ success: false, message: "Kolo je u toku." });
+    if (!users[userId]) return;
+    if (currentRound.status !== "open") return;
+    if (stake > users[userId].balance) return;
 
-            if (!userId || !Array.isArray(numbers))
-                return callback({ success: false, message: "Neispravni podaci." });
+    users[userId].balance -= stake;
 
-            if (numbers.length === 0 || numbers.length > MAX_PICK)
-                return callback({ success: false, message: "Neispravan broj brojeva." });
+    const ticket = {
+      id: uuidv4(),
+      userId,
+      socketId: socket.id,
+      numbers,
+      stake,
+      status: "pending"
+    };
 
-            if (amount < MIN_BET)
-                return callback({ success: false, message: "Minimalna uplata je 20." });
+    tickets[currentRound.id].push(ticket);
 
-            const uniqueNumbers = [...new Set(numbers)];
-            if (uniqueNumbers.length !== numbers.length)
-                return callback({ success: false, message: "Dupli brojevi." });
-
-            if (numbers.some(n => n < 1 || n > TOTAL_NUMBERS))
-                return callback({ success: false, message: "Brojevi van opsega." });
-
-            const balanceRef = db.ref(`users/${userId}/balance`);
-
-            let newBalance = 0;
-
-            await balanceRef.transaction(balance => {
-                if ((balance || 0) < amount) return;
-                newBalance = balance - amount;
-                return newBalance;
-            });
-
-            const ticketRef = db.ref("tickets").push();
-            await ticketRef.set({
-                userId,
-                roundId: currentRoundId,
-                numbers,
-                amount,
-                status: "pending",
-                createdAt: Date.now()
-            });
-
-            callback({ success: true, balance: newBalance });
-
-        } catch (err) {
-            console.error("Bet error:", err);
-            callback({ success: false, message: "Server greška." });
-        }
+    socket.emit("ticketAccepted", {
+      balance: users[userId].balance
     });
+  });
+
+  socket.on("disconnect", () => {
+    console.log("Disconnected:", socket.id);
+  });
 });
 
-// ======================================================
-// GAME LOOP
-// ======================================================
+/************************************************
+ * AUTO ROUND TIMER
+ ************************************************/
 
-async function runGameCycle() {
-    while (true) {
+setInterval(() => {
+  if (currentRound.status === "open") {
+    closeRound();
+  }
+}, 30000);
 
-        currentRoundId = Date.now();
-        currentRoundStatus = "waiting";
-        drawnNumbers = [];
-        countdown = 90;
+startNewRound();
 
-        while (countdown > 0) {
-            io.emit("roundUpdate", {
-                roundId: currentRoundId,
-                status: "waiting",
-                timeLeft: countdown
-            });
-            await new Promise(r => setTimeout(r, 1000));
-            countdown--;
-        }
-
-        currentRoundStatus = "running";
-        io.emit("roundUpdate", { roundId: currentRoundId, status: "running" });
-
-        for (let i = 0; i < 20; i++) {
-            let ball;
-
-            if (i < 10) {
-                do {
-                    ball = Math.floor(Math.random() * 80) + 1;
-                } while (drawnNumbers.includes(ball));
-            } else {
-                ball = await getSmartBall(drawnNumbers, currentRoundId);
-            }
-
-            drawnNumbers.push(ball);
-            io.emit("ballDrawn", { number: ball });
-            await new Promise(r => setTimeout(r, 3000));
-        }
-
-        currentRoundStatus = "calculating";
-
-        roundHistory[currentRoundId] = [...drawnNumbers];
-        if (Object.keys(roundHistory).length > 20)
-            delete roundHistory[Object.keys(roundHistory)[0]];
-
-        io.emit("roundFinished", {
-            roundId: currentRoundId,
-            allNumbers: drawnNumbers,
-            history: roundHistory
-        });
-
-        await processTickets(currentRoundId, drawnNumbers);
-
-        await new Promise(r => setTimeout(r, 10000));
-    }
-}
-
-// ======================================================
-// START SERVER
-// ======================================================
-
-const PORT = process.env.PORT || 3000;
-
-server.listen(PORT, "0.0.0.0", () => {
-    console.log("🚀 KENO MASTER SERVER POKRENUT");
-    console.log("💰 RTP:", RTP_TARGET * 100, "%");
-    runGameCycle();
+server.listen(PORT, () => {
+  console.log("Server running on port", PORT);
 });
