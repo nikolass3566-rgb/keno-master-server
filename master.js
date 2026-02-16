@@ -2,7 +2,10 @@ const http = require("http");
 const admin = require("firebase-admin");
 const express = require("express");
 const { Server } = require("socket.io");
-
+// ================= NA SAMOM VRHU FAJLA (iza require-a) =================
+let currentRoundId = Date.now(); // Inicijalizacija odmah
+let currentRoundStatus = "waiting";
+let drawnNumbers = [];
 const app = express();
 const server = http.createServer(app);
 
@@ -291,3 +294,28 @@ io.on("connection", (socket) => {
         // ... ostali podaci
     });
 });
+async function finalizeRound() {
+    // 1. Sačuvaj trenutne rezultate u istoriju pre nego što krene novo kolo
+    roundHistory[currentRoundId] = [...drawnNumbers];
+
+    // Ograniči istoriju na poslednjih 15 kola (da ne preopteretiš RAM)
+    const keys = Object.keys(roundHistory);
+    if (keys.length > 15) {
+        delete roundHistory[keys[0]];
+    }
+
+    // 2. Emituj kraj runde sa istorijom
+    io.emit("roundFinished", { 
+        roundId: currentRoundId, 
+        allNumbers: drawnNumbers,
+        history: roundHistory 
+    });
+
+    // 3. Obračunaj tikete u Firebase-u (isplata para)
+    await processTickets(currentRoundId, drawnNumbers);
+
+    // 4. Tek sada kreiraj NOVI ID za sledeće kolo
+    currentRoundId = Date.now();
+    currentRoundStatus = "waiting";
+    drawnNumbers = [];
+}
