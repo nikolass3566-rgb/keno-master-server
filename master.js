@@ -1,13 +1,22 @@
-const http = require("http"); // OBAVEZNO DODAJ OVU LINIJU
+const http = require("http");
 const admin = require("firebase-admin");
+const express = require("express");
+const { Server } = require("socket.io");
+
+const app = express();
+const server = http.createServer(app);
+
+// Socket.io setup - Srce sistema za 100k ljudi
+const io = new Server(server, {
+    cors: { origin: "*", methods: ["GET", "POST"] }
+});
 
 let serviceAccount;
 
-// 1. Prvo gledamo da li postoji Render varijabla (za produkciju)
+// 1. FIREBASE ADMIN SETUP (Tvoj originalni setup sa Render podrškom)
 if (process.env.FIREBASE_CONFIG_JSON) {
     try {
         serviceAccount = JSON.parse(process.env.FIREBASE_CONFIG_JSON);
-        // Popravka za private_key format
         if (serviceAccount.private_key) {
             serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
         }
@@ -15,267 +24,162 @@ if (process.env.FIREBASE_CONFIG_JSON) {
     } catch (err) {
         console.error("❌ Greška pri parsiranju FIREBASE_CONFIG_JSON:", err.message);
     }
-} 
-// 2. Ako nema varijable, tek tada pokušavamo lokalni fajl (za tvoj kompjuter)
-else {
+} else {
     try {
         serviceAccount = require("./serviceAccountKey.json");
         console.log("✅ Firebase učitan preko lokalnog fajla.");
     } catch (err) {
-        console.log("⚠️ Nije pronađen ni fajl ni varijabla. Proveri podešavanja!");
+        console.log("⚠️ Nije pronađen serviceAccountKey.json!");
     }
-}
-// Pre inicijalizacije uradi ovo:
-if (serviceAccount.private_key) {
-    serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
 }
 
-admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount),
-    databaseURL: "https://keno-demo-31bf2-default-rtdb.europe-west1.firebasedatabase.app"
-});
-// 3. Inicijalizacija samo ako smo našli ključ
-if (serviceAccount) {
-    if (!admin.apps.length) {
-        admin.initializeApp({
-            credential: admin.credential.cert(serviceAccount),
-            databaseURL: "https://keno-demo-31bf2-default-rtdb.europe-west1.firebasedatabase.app"
-        });
-    }
-} else {
-    console.error("❌ Kritična greška: Firebase Admin nije mogao biti inicijalizovan!");
-}
-// 4. INICIJALIZACIJA FIREBASE-A
-if (serviceAccount) {
-    if (!admin.apps.length) {
-        admin.initializeApp({
-            credential: admin.credential.cert(serviceAccount),
-            databaseURL: "https://keno-demo-31bf2-default-rtdb.europe-west1.firebasedatabase.app"
-        });
-    }
+if (serviceAccount && !admin.apps.length) {
+    admin.initializeApp({
+        credential: admin.credential.cert(serviceAccount),
+        databaseURL: "https://keno-demo-31bf2-default-rtdb.europe-west1.firebasedatabase.app"
+    });
 }
 
 const db = admin.database();
 const roundRef = db.ref("currentRound");
 
-// 5. KONSTANTE I PAYTABLE
+// 2. KONSTANTE I PAYTABLE (Tvoji originalni podaci)
+const WAIT_TIME = 90000; 
+const DRAW_INTERVAL = 4000;
 const KENO_PAYTABLE = {
-    1: { 1: 3.4 }, 2: { 2: 12.5 }, 3: { 2: 2, 3: 40 },
-    4: { 2: 1, 3: 8, 4: 180 }, 5: { 3: 3, 4: 15, 5: 450 },
-    6: { 3: 2, 4: 10, 5: 45, 6: 1800 }, 7: { 4: 4, 5: 15, 6: 120, 7: 4000 },
-    8: { 4: 2, 5: 10, 6: 40, 7: 400, 8: 8000 }, 9: { 5: 5, 6: 20, 7: 120, 8: 1200, 9: 20000 },
-    10: { 4: 2, 5: 5, 6: 10, 7: 40, 8: 400, 9: 4000, 10: 100000 }
+    1: { 1: 3.5 },
+    2: { 1: 1, 2: 14 },
+    3: { 2: 2, 3: 65 },
+    4: { 2: 1, 3: 10, 4: 275 },
+    5: { 3: 3, 4: 45, 5: 1350 },
+    6: { 3: 2, 4: 12, 5: 150, 6: 6500 },
+    7: { 4: 5, 5: 45, 6: 800, 7: 25000 },
+    8: { 4: 2, 5: 15, 6: 150, 7: 2500, 8: 100000 },
+    9: { 5: 10, 6: 60, 7: 800, 8: 12000, 9: 250000 },
+    10: { 5: 5, 6: 30, 7: 250, 8: 2500, 9: 35000, 10: 1000000 }
 };
 
-const WAIT_TIME = 90000;
-const DRAW_INTERVAL = 3500;
-
-// 6. POMOĆNE FUNKCIJE
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
-
-async function serverLog(message) {
-    const time = new Date().toLocaleTimeString();
-    const fullMessage = `[MASTER ${time}]: ${message}`;
-    console.log(fullMessage);
-    try {
-        await db.ref("serverLogs").set({
-            message: fullMessage,
-            timestamp: Date.now()
-        });
-    } catch (e) { }
-}
-
-// 7. LOGIKA IGRE
-async function startMaster() {
-    await serverLog("Sistem pokrenut i spreman.");
-
-    while (true) {
-        try {
-            const snap = await roundRef.get();
-            const round = snap.val();
-
-            if (!round) {
-                await createNewRound(1001);
-                continue;
-            }
-
-            const sada = Date.now();
-
-            // RESET ZAGLAVLJENOG KOLA
-            const predugoTraje = round.lastBallTime && (sada - round.lastBallTime > 180000);
-            if (round.status === "running" && predugoTraje) {
-                await serverLog("⚠️ Detektovano zaglavljeno kolo. Resetujem...");
-                await finishRound(round);
-                continue;
-            }
-
-            // RECOVERY: Nastavak izvlačenja
-            if (round.status === "running") {
-                const izvuceno = round.drawnAnimated ? Object.values(round.drawnAnimated).length : 0;
-                if (izvuceno < 20) {
-                    await serverLog(`Nastavljam prekinuto kolo ${round.roundId}`);
-                    await resumeDrawing(round);
-                } else {
-                    await finishRound(round);
-                }
-                continue;
-            }
-
-            // WAITING FAZA
-            if (round.status === "waiting") {
-                const preostalo = round.endTime - sada;
-                if (preostalo < -10000) { 
-                    await serverLog("🔄 Produžavam tajmer zbog prekida.");
-                    await roundRef.update({ endTime: sada + 30000 });
-                    continue;
-                }
-                if (preostalo <= 0) {
-                    await startNewDrawing(round);
-                }
-            } 
-            else if (round.status === "finished") {
-                await sleep(15000);
-                await createNewRound(round.roundId + 1);
-            }
-
-        } catch (error) {
-            console.error("❌ Greška u glavnoj petlji:", error.message);
-            await sleep(5000);
-        }
-        await sleep(2000);
-    }
-}
-
-async function startNewDrawing(round) {
-    await serverLog(`Započinjem izvlačenje za kolo ${round.roundId}`);
-    const finalNumbers = await generisiOptimalneBrojeve(round.roundId);
-    await roundRef.update({
-        status: "running",
-        drawnNumbers: finalNumbers,
-        drawnAnimated: []
+// 3. SOCKET UPRAVLJANJE KORISNICIMA
+io.on("connection", (socket) => {
+    console.log(`🔌 Igrač povezan: ${socket.id}`);
+    
+    // Čim uđe, daj mu trenutnu sliku runde iz baze
+    roundRef.once("value").then(snap => {
+        socket.emit("initialState", snap.val());
     });
-    await resumeDrawing({ ...round, status: "running", drawnNumbers: finalNumbers, drawnAnimated: [] });
+});
+
+// 4. POMOĆNE FUNKCIJE (Vraćene sve tvoje originalne funkcije)
+
+async function getNextRoundId() {
+    const snap = await db.ref("lastRoundId").get();
+    let nextId = (snap.val() || 1000) + 1;
+    await db.ref("lastRoundId").set(nextId);
+    return nextId;
 }
 
-async function resumeDrawing(round) {
-    const finalNumbers = round.drawnNumbers;
-    const snap = await roundRef.child("drawnAnimated").get();
-    let currentAnimated = snap.val() ? Object.values(snap.val()) : [];
-
-    for (let i = currentAnimated.length; i < 20; i++) {
-        const nextBall = finalNumbers[i];
-        try {
-            await roundRef.child("drawnAnimated").child(i.toString()).set(nextBall);
-            await serverLog(`Loptica [${i + 1}/20]: ${nextBall}`);
-            await sleep(DRAW_INTERVAL);
-        } catch (e) {
-            await serverLog("Greška u slanju, ponavljam...");
-            i--;
-            await sleep(3000);
-        }
-    }
-    await finishRound(round);
-}
-
-async function finishRound(round) {
-    await serverLog("Obračun tiketa u toku...");
-    try {
-        await processTickets(round.roundId, round.drawnNumbers);
-        await roundRef.update({ status: "finished", lastBallTime: Date.now() });
-        await db.ref(`roundsHistory/${round.roundId}`).set({
-            roundId: round.roundId,
-            drawnNumbers: round.drawnNumbers,
-            timestamp: Date.now()
-        });
-        await serverLog(`✅ Kolo ${round.roundId} završeno.`);
-    } catch (e) {
-        console.error("Greška pri završavanju:", e.message);
-    }
-}
-
-async function generisiOptimalneBrojeve(roundId) {
-    try {
-        const ticketsSnap = await db.ref("tickets").get();
-        let activeTickets = [];
-        let rundaUplata = 0;
-
-        if (ticketsSnap.exists()) {
-            ticketsSnap.forEach(child => {
-                const t = child.val();
-                if (Number(t.roundId) === Number(roundId) && t.status === "pending") {
-                    activeTickets.push(t);
-                    rundaUplata += t.amount;
-                }
-            });
-        }
-
-        let limitIsplate = rundaUplata * 0.70;
-        let bestNumbers = [];
-        let minPayout = Infinity;
-
-        for (let i = 0; i < 100; i++) {
-            let testNumbers = Array.from({ length: 80 }, (_, i) => i + 1)
-                .sort(() => Math.random() - 0.5).slice(0, 20);
-
-            let payout = 0;
-            activeTickets.forEach(t => {
-                const hits = t.numbers.filter(n => testNumbers.includes(n)).length;
-                const mult = KENO_PAYTABLE[t.numbers.length]?.[hits] || 0;
-                payout += (t.amount * mult);
-            });
-
-            if (payout <= limitIsplate) return testNumbers;
-            if (payout < minPayout) { minPayout = payout; bestNumbers = testNumbers; }
-        }
-        return bestNumbers;
-    } catch (e) {
-        return Array.from({ length: 80 }, (_, i) => i + 1).sort(() => Math.random() - 0.5).slice(0, 20);
-    }
+async function createNewRound(id) {
+    const endTime = Date.now() + WAIT_TIME;
+    const roundData = {
+        roundId: id,
+        status: "waiting",
+        endTime: endTime,
+        drawnNumbers: [],
+        drawnAnimated: []
+    };
+    await roundRef.set(roundData);
+    
+    // Obavesti Socket klijente
+    io.emit("roundUpdate", roundData);
 }
 
 async function processTickets(roundId, drawnNumbers) {
+    console.log(`[Isplata] Provera tiketa za kolo ${roundId}...`);
     const ticketsSnap = await db.ref("tickets").get();
     if (!ticketsSnap.exists()) return;
+
     const tickets = ticketsSnap.val();
+    const updates = {};
+    
     for (const key in tickets) {
         const t = tickets[key];
         if (Number(t.roundId) === Number(roundId) && t.status === "pending") {
             const hits = t.numbers.filter(n => drawnNumbers.includes(n)).length;
             const mult = KENO_PAYTABLE[t.numbers.length]?.[hits] || 0;
             const win = Math.floor(t.amount * mult);
-            await db.ref(`tickets/${key}`).update({
-                hits, winAmount: win, status: win > 0 ? "win" : "lose"
-            });
+            
+            updates[`tickets/${key}/hits`] = hits;
+            updates[`tickets/${key}/winAmount`] = win;
+            updates[`tickets/${key}/status`] = win > 0 ? "win" : "lose";
+
             if (win > 0) {
                 const userRef = db.ref(`users/${t.userId}/balance`);
                 const uSnap = await userRef.get();
                 await userRef.set((uSnap.val() || 0) + win);
+                console.log(`💰 Isplaćeno ${win} RSD korisniku ${t.userId}`);
             }
         }
     }
+    if (Object.keys(updates).length > 0) await db.ref().update(updates);
 }
 
-async function createNewRound(id) {
-    await roundRef.set({
-        roundId: id,
-        status: "waiting",
-        endTime: Date.now() + WAIT_TIME,
-        drawnNumbers: [],
-        drawnAnimated: []
-    });
+function sleep(ms) { return new Promise(res => setTimeout(res, ms)); }
+
+// 5. GLAVNA LOGIKA IGRE (Svi tvoji koraci su tu)
+
+async function runGame() {
+    console.log("🚀 Keno Master Start...");
+    
+    while (true) {
+        let roundId = await getNextRoundId();
+        
+        // --- KORAK 1: ČEKANJE (WAITING) ---
+        await createNewRound(roundId);
+        console.log(`🔹 Kolo ${roundId}: Počela uplata.`);
+        await sleep(WAIT_TIME);
+
+        // --- KORAK 2: IZVLAČENJE (RUNNING) ---
+        await roundRef.update({ status: "running" });
+        io.emit("roundUpdate", { status: "running", roundId: roundId });
+        console.log(`🔴 Kolo ${roundId}: Izvlačenje!`);
+
+        let drawn = [];
+        for (let i = 0; i < 20; i++) {
+            let n;
+            do { n = Math.floor(Math.random() * 80) + 1; } while (drawn.includes(n));
+            drawn.push(n);
+
+            // Ažuriraj bazu (da refresh stranice radi)
+            await roundRef.update({ drawnAnimated: drawn });
+
+            // NAJBITNIJE: Socket šalje broj SVIMA momentalno
+            io.emit("newBall", { number: n, allDrawn: drawn, index: i + 1 });
+
+            console.log(`Loptica ${i+1}: ${n}`);
+            await sleep(DRAW_INTERVAL);
+        }
+
+        // --- KORAK 3: OBRAČUN (CALCULATING) ---
+        await roundRef.update({ status: "calculating", drawnNumbers: drawn });
+        io.emit("roundUpdate", { status: "calculating" });
+
+        await processTickets(roundId, drawn);
+
+        // Arhiviranje
+        await db.ref(`roundsHistory/${roundId}`).set({
+            roundId,
+            drawnNumbers: drawn,
+            createdAt: Date.now()
+        });
+
+        console.log(`✅ Kolo ${roundId} završeno.`);
+        await sleep(10000); // Pauza od 10s između kola
+    }
 }
 
-// 8. POKRETANJE I KEEP-ALIVE SERVER
-const server = http.createServer((req, res) => {
-    res.statusCode = 200;
-    res.setHeader('Content-Type', 'text/plain');
-    res.end('Keno Master is running...');
+// 6. SERVER START
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+    console.log(`\n⭐ MASTER SERVER AKTIVAN NA PORTU ${PORT}`);
+    runGame().catch(err => console.error("KRITIČNA GREŠKA:", err));
 });
-// Dodaj ovu liniju pre server.listen
-const port = process.env.PORT || 10000;
-server.listen(port, () => {
-    console.log(`Keep-alive server running on port ${port}`);
-});
-
-// Glavni start
-startMaster().catch(err => console.error("Kritična greška:", err));

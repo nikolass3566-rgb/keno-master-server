@@ -5,9 +5,10 @@
   "main": "master.js",
   "scripts": {
     "start": "node master.js"
-},
+  },
   "dependencies": {
-    "firebase-admin": "^13.6.1"
+    "express": "^5.2.1",
+    "firebase-admin": "^13.6.1",
+    "socket.io": "^4.8.3"
   }
 }
-
