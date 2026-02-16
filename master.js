@@ -201,19 +201,17 @@ async function runGame() {
 }
 
 // ================= SOCKET KONEKCIJA =================
-// Unutar io.on("connection", (socket) => { ... })
-io.on("connection", (socket) => { 
-    console.log(`Klijent povezan: ${socket.id}`);
+// 2. ISPRAVI SOCKET KONEKCIJU (Linija 212 gde ti javlja grešku)
+io.on("connection", (socket) => {
+    console.log("Novi igrač povezan:", socket.id);
 
-    // Šaljemo sve što klijentu treba za "hladni start"
+    // Šaljemo snapshot stanja - OVO SADA RADI jer je countdown globalan
     socket.emit("initialState", {
         roundId: currentRoundId,
-        status: currentRoundStatus, // "waiting" ili "running"
-        timeLeft: countdown,        // Sinhronizovan tajmer
-        drawnNumbers: drawnNumbers, // Brojevi koji su VEĆ izašli u ovoj rundi
-        history: roundHistory,      // Rezultati prethodnih kola za .hit klasu
-        jackpot: currentJackpot,    // Pretpostavka da imaš ovu varijablu
-        bonus: currentBonus         // Pretpostavka da imaš ovu varijablu
+        status: currentRoundStatus,
+        timeLeft: countdown, // Više neće biti ReferenceError
+        drawnNumbers: drawnNumbers,
+        history: roundHistory
     });
 });
 // ================= START =================
