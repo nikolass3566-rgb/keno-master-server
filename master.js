@@ -16,7 +16,15 @@ const io = new Server(server, {
         methods: ["GET", "POST"]
     }
 });
-
+// U io.on("connection"), pošalji istoriju novom igraču
+io.on("connection", (socket) => {
+    socket.emit("initialState", {
+        roundId: currentRoundId,
+        status: currentRoundStatus,
+        history: roundHistory, // Igrač odmah dobija rezultate prošlih kola
+        // ... ostali podaci
+    });
+});
 let serviceAccount;
 
 // 1. FIREBASE ADMIN SETUP
@@ -285,37 +293,47 @@ async function finishRound(roundId, finalNumbers) {
     await processTickets(roundId, finalNumbers);
 }
 
-// U io.on("connection"), pošalji istoriju novom igraču
-io.on("connection", (socket) => {
-    socket.emit("initialState", {
-        roundId: currentRoundId,
-        status: currentRoundStatus,
-        history: roundHistory, // Igrač odmah dobija rezultate prošlih kola
-        // ... ostali podaci
-    });
-});
+
+async function finalizeRound() {// Na vrhu master.js (pobrini se da ove varijable postoje globalno)
+let currentRoundId = Date.now();
+let drawnNumbers = []; // Niz u koji dodaješ loptice jednu po jednu
+let roundHistory = {}; 
+
 async function finalizeRound() {
-    // 1. Sačuvaj trenutne rezultate u istoriju pre nego što krene novo kolo
-    roundHistory[currentRoundId] = [...drawnNumbers];
+    try {
+        // PROVERA: Koristi ime varijable koja STVARNO sadrži 20 brojeva.
+        // Ako si u kodu koristio finalDrawnNumbers, promeni to u drawnNumbers.
+        
+        const finalNumbersForProcessing = [...drawnNumbers]; // Kopiramo niz izvucenih brojeva
 
-    // Ograniči istoriju na poslednjih 15 kola (da ne preopteretiš RAM)
-    const keys = Object.keys(roundHistory);
-    if (keys.length > 15) {
-        delete roundHistory[keys[0]];
+        // 1. Sačuvaj u istoriju za "zlatne brojeve" na klijentu
+        roundHistory[currentRoundId] = finalNumbersForProcessing;
+
+        // Ograniči istoriju na 15 kola
+        const keys = Object.keys(roundHistory);
+        if (keys.length > 15) delete roundHistory[keys[0]];
+
+        // 2. Emituj klijentima da je gotovo
+        io.emit("roundFinished", { 
+            roundId: currentRoundId, 
+            allNumbers: finalNumbersForProcessing,
+            history: roundHistory 
+        });
+
+        console.log(`[MASTER] Kolo ${currentRoundId} završeno. Brojevi: ${finalNumbersForProcessing}`);
+
+        // 3. POZIV FUNKCIJE ZA OBRAČUN TIKETA
+        // Ovde je verovatno bila greška - prosledi ispravnu varijablu
+        await processTickets(currentRoundId, finalNumbersForProcessing);
+
+        // 4. Resetuj sve za novo kolo
+        setTimeout(() => {
+            currentRoundId = Date.now();
+            drawnNumbers = [];
+            // startNewRound(); // tvoja funkcija za početak novog kola
+        }, 5000);
+
+    } catch (error) {
+        console.error("GREŠKA U finalizeRound:", error);
     }
-
-    // 2. Emituj kraj runde sa istorijom
-    io.emit("roundFinished", { 
-        roundId: currentRoundId, 
-        allNumbers: drawnNumbers,
-        history: roundHistory 
-    });
-
-    // 3. Obračunaj tikete u Firebase-u (isplata para)
-    await processTickets(currentRoundId, drawnNumbers);
-
-    // 4. Tek sada kreiraj NOVI ID za sledeće kolo
-    currentRoundId = Date.now();
-    currentRoundStatus = "waiting";
-    drawnNumbers = [];
-}
+}}
