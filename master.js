@@ -236,7 +236,16 @@ async function runGame() {
             roundId: currentRoundId,
             allNumbers: finalDrawnNumbers
         });
+// Negde u tvojoj keno logici...
+console.log("Izvlačenje završeno!");
 
+// Prvo pošalji klijentima da je gotovo
+io.emit("roundFinished", { roundId: currentRoundId, allNumbers: drawnNumbers });
+
+
+
+// Nakon toga pripremi sve za novo kolo
+// currentRoundId = Date.now(); ... itd.
         // Pozovi funkciju za Firebase obračun
         processTickets(currentRoundId, finalDrawnNumbers);
     }
