@@ -150,3 +150,11 @@ server.listen(PORT, () => {
     console.log(`Server aktivan na portu ${PORT}`);
     runGame();
 });
+// master.js
+db.ref("tickets").on("child_added", async (snapshot) => {
+    const ticket = snapshot.val();
+    if (!ticket.roundId) {
+        // Server mu dodeljuje ID kola koje je TRENUTNO aktivno na serveru
+        await snapshot.ref.update({ roundId: currentRoundId });
+    }
+});
