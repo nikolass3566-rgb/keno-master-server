@@ -48,7 +48,7 @@ const roundRef = db.ref("currentRound");
 
 // 2. KONSTANTE
 const WAIT_TIME_SECONDS = 90; // 90 sekundi
-const WAIT_TIME_MS = WAIT_TIME_SECONDS * 1000; 
+const WAIT_TIME_MS = WAIT_TIME_SECONDS * 1000;
 const DRAW_INTERVAL = 4000;
 const KENO_PAYTABLE = {
     1: { 1: 3.5 },
@@ -66,7 +66,7 @@ const KENO_PAYTABLE = {
 // 3. SOCKET UPRAVLJANJE KORISNICIMA
 io.on("connection", (socket) => {
     console.log(`🔌 Igrač povezan: ${socket.id}`);
-    
+
     // Čim se poveže, šaljemo mu trenutno stanje direktno iz memorije/baze
     roundRef.once("value").then(snap => {
         socket.emit("initialState", snap.val());
@@ -81,33 +81,57 @@ async function getNextRoundId() {
     return nextId;
 }
 
+// U master.js dodaj ovu funkciju za proveru svih "pending" tiketa
 async function processTickets(roundId, drawnNumbers) {
-    console.log(`[Isplata] Provera tiketa za kolo ${roundId}...`);
-    const ticketsSnap = await db.ref("tickets").get();
-    if (!ticketsSnap.exists()) return;
+    console.log(`Započinjem obračun za kolo: ${roundId}`);
 
-    const tickets = ticketsSnap.val();
+    const ticketsRef = db.ref("tickets");
+    // Uzmi sve tikete koji čekaju (pending) i pripadaju ovom kolu
+    const snapshot = await ticketsRef.orderByChild("roundId").equalTo(roundId).once("value");
+
+    if (!snapshot.exists()) {
+        console.log("Nema tiketa za obračun u ovom kolu.");
+        return;
+    }
+
+    const tickets = snapshot.val();
     const updates = {};
-    
-    for (const key in tickets) {
-        const t = tickets[key];
-        if (Number(t.roundId) === Number(roundId) && t.status === "pending") {
-            const hits = t.numbers.filter(n => drawnNumbers.includes(n)).length;
-            const mult = KENO_PAYTABLE[t.numbers.length]?.[hits] || 0;
-            const win = Math.floor(t.amount * mult);
-            
-            updates[`tickets/${key}/hits`] = hits;
-            updates[`tickets/${key}/winAmount`] = win;
-            updates[`updates/tickets/${key}/status`] = win > 0 ? "win" : "lose";
 
-            if (win > 0) {
-                const userRef = db.ref(`users/${t.userId}/balance`);
-                const uSnap = await userRef.get();
-                await userRef.set((uSnap.val() || 0) + win);
-            }
+    for (const key in tickets) {
+        const ticket = tickets[key];
+        if (ticket.status !== "pending") continue;
+
+        // Izbroj pogotke
+        const hits = ticket.numbers.filter(num => drawnNumbers.includes(num)).length;
+
+        // IZRAČUNAJ DOBITAK (Ovo je tvoja logika kvota)
+        // Primer: kvota je (broj pogodaka * 2) - prilagodi svojim pravilima
+        let winAmount = 0;
+        if (hits >= 1) {
+            // Primer proste logike: fiksne kvote ili množioci
+            const odds = [0, 2, 5, 10, 20, 50, 100, 500, 1000, 5000, 10000]; // Kvote za 0 do 10 pogodaka
+            winAmount = ticket.amount * (odds[hits] || 0);
+        }
+
+        const status = winAmount > 0 ? "won" : "lost";
+
+        // Pripremi update za tiket
+        updates[`/tickets/${key}/status`] = status;
+        updates[`/tickets/${key}/winAmount`] = winAmount;
+
+        // Ako je dobitan, dodaj novac korisniku odmah
+        if (winAmount > 0) {
+            const userBalanceRef = db.ref(`users/${ticket.userId}/balance`);
+            await userBalanceRef.transaction((currentBalance) => {
+                return (currentBalance || 0) + winAmount;
+            });
+            console.log(`Korisnik ${ticket.userId} dobio ${winAmount} RSD`);
         }
     }
-    if (Object.keys(updates).length > 0) await db.ref().update(updates);
+
+    // Izvrši sve promene na tiketima odjednom
+    await db.ref().update(updates);
+    console.log("Obračun završen.");
 }
 
 function sleep(ms) { return new Promise(res => setTimeout(res, ms)); }
@@ -115,7 +139,7 @@ function sleep(ms) { return new Promise(res => setTimeout(res, ms)); }
 // 5. GLAVNA LOGIKA IGRE
 async function runGame() {
     console.log("🚀 Keno Master Start...");
-    
+
     while (true) {
         let roundId = await getNextRoundId();
         let endTime = Date.now() + WAIT_TIME_MS;
@@ -129,7 +153,7 @@ async function runGame() {
             drawnAnimated: []
         };
         await roundRef.set(roundData);
-        
+
         console.log(`🔹 Kolo ${roundId}: Počela uplata.`);
 
         // TAJMER PETLJA: Emituje svake sekunde preko Socketa
@@ -158,13 +182,13 @@ async function runGame() {
             await roundRef.update({ drawnAnimated: drawn });
 
             // SOCKET EMIT: Šalje lopticu klijentu ZA ANIMACIJU
-            io.emit("ballDrawn", { 
-                number: n, 
-                allDrawn: drawn, 
+            io.emit("ballDrawn", {
+                number: n,
+                allDrawn: drawn,
                 index: i // Šaljemo index 0-19 da klijent zna kad da očisti grid
             });
 
-            console.log(`Loptica ${i+1}: ${n}`);
+            console.log(`Loptica ${i + 1}: ${n}`);
             await sleep(DRAW_INTERVAL);
         }
 
@@ -184,6 +208,15 @@ async function runGame() {
         io.emit("roundFinished", { roundId: roundId });
         console.log(`✅ Kolo ${roundId} završeno.`);
         await sleep(10000); // 10s pauze pre novog kola
+
+        // U master.js (na kraju runde)
+        io.emit("roundFinished", {
+            roundId: currentRoundId,
+            allNumbers: finalDrawnNumbers
+        });
+
+        // Pozovi funkciju za Firebase obračun
+        processTickets(currentRoundId, finalDrawnNumbers);
     }
 }
 
