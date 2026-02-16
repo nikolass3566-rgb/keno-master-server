@@ -6,17 +6,17 @@ const { Server } = require("socket.io");
 const app = express();
 const server = http.createServer(app);
 
-// Socket.io setup - Srce sistema za 100k ljudi
-const io = require("socket.io")(server, {
-  cors: {
-    origin: "https://keno-demo-31bf2.firebaseapp.com", // U produkciji ovde stavi domen tvog sajta, npr: "https://tvoj-sajt.netlify.app"
-    methods: ["GET", "POST"]
-  }
+// Socket.io setup - Optimizovano za real-time tajmer i animacije
+const io = new Server(server, {
+    cors: {
+        origin: "*", // Dozvoljava svim originima, rešava CORS probleme sa kosom crtom
+        methods: ["GET", "POST"]
+    }
 });
 
 let serviceAccount;
 
-// 1. FIREBASE ADMIN SETUP (Tvoj originalni setup sa Render podrškom)
+// 1. FIREBASE ADMIN SETUP
 if (process.env.FIREBASE_CONFIG_JSON) {
     try {
         serviceAccount = JSON.parse(process.env.FIREBASE_CONFIG_JSON);
@@ -46,8 +46,9 @@ if (serviceAccount && !admin.apps.length) {
 const db = admin.database();
 const roundRef = db.ref("currentRound");
 
-// 2. KONSTANTE I PAYTABLE (Tvoji originalni podaci)
-const WAIT_TIME = 90000; 
+// 2. KONSTANTE
+const WAIT_TIME_SECONDS = 90; // 90 sekundi
+const WAIT_TIME_MS = WAIT_TIME_SECONDS * 1000; 
 const DRAW_INTERVAL = 4000;
 const KENO_PAYTABLE = {
     1: { 1: 3.5 },
@@ -66,34 +67,18 @@ const KENO_PAYTABLE = {
 io.on("connection", (socket) => {
     console.log(`🔌 Igrač povezan: ${socket.id}`);
     
-    // Čim uđe, daj mu trenutnu sliku runde iz baze
+    // Čim se poveže, šaljemo mu trenutno stanje direktno iz memorije/baze
     roundRef.once("value").then(snap => {
         socket.emit("initialState", snap.val());
     });
 });
 
-// 4. POMOĆNE FUNKCIJE (Vraćene sve tvoje originalne funkcije)
-
+// 4. POMOĆNE FUNKCIJE
 async function getNextRoundId() {
     const snap = await db.ref("lastRoundId").get();
     let nextId = (snap.val() || 1000) + 1;
     await db.ref("lastRoundId").set(nextId);
     return nextId;
-}
-
-async function createNewRound(id) {
-    const endTime = Date.now() + WAIT_TIME;
-    const roundData = {
-        roundId: id,
-        status: "waiting",
-        endTime: endTime,
-        drawnNumbers: [],
-        drawnAnimated: []
-    };
-    await roundRef.set(roundData);
-    
-    // Obavesti Socket klijente
-    io.emit("roundUpdate", roundData);
 }
 
 async function processTickets(roundId, drawnNumbers) {
@@ -113,13 +98,12 @@ async function processTickets(roundId, drawnNumbers) {
             
             updates[`tickets/${key}/hits`] = hits;
             updates[`tickets/${key}/winAmount`] = win;
-            updates[`tickets/${key}/status`] = win > 0 ? "win" : "lose";
+            updates[`updates/tickets/${key}/status`] = win > 0 ? "win" : "lose";
 
             if (win > 0) {
                 const userRef = db.ref(`users/${t.userId}/balance`);
                 const uSnap = await userRef.get();
                 await userRef.set((uSnap.val() || 0) + win);
-                console.log(`💰 Isplaćeno ${win} RSD korisniku ${t.userId}`);
             }
         }
     }
@@ -128,20 +112,38 @@ async function processTickets(roundId, drawnNumbers) {
 
 function sleep(ms) { return new Promise(res => setTimeout(res, ms)); }
 
-// 5. GLAVNA LOGIKA IGRE (Svi tvoji koraci su tu)
-
+// 5. GLAVNA LOGIKA IGRE
 async function runGame() {
     console.log("🚀 Keno Master Start...");
     
     while (true) {
         let roundId = await getNextRoundId();
-        
-        // --- KORAK 1: ČEKANJE (WAITING) ---
-        await createNewRound(roundId);
-        console.log(`🔹 Kolo ${roundId}: Počela uplata.`);
-        await sleep(WAIT_TIME);
+        let endTime = Date.now() + WAIT_TIME_MS;
 
-        // --- KORAK 2: IZVLAČENJE (RUNNING) ---
+        // --- KORAK 1: WAITING FAZA ---
+        let roundData = {
+            roundId: roundId,
+            status: "waiting",
+            endTime: endTime,
+            drawnNumbers: [],
+            drawnAnimated: []
+        };
+        await roundRef.set(roundData);
+        
+        console.log(`🔹 Kolo ${roundId}: Počela uplata.`);
+
+        // TAJMER PETLJA: Emituje svake sekunde preko Socketa
+        for (let s = WAIT_TIME_SECONDS; s >= 0; s--) {
+            io.emit("roundUpdate", {
+                roundId: roundId,
+                status: "waiting",
+                timeLeft: s,
+                totalTime: WAIT_TIME_SECONDS
+            });
+            await sleep(1000);
+        }
+
+        // --- KORAK 2: RUNNING FAZA (IZVLAČENJE) ---
         await roundRef.update({ status: "running" });
         io.emit("roundUpdate", { status: "running", roundId: roundId });
         console.log(`🔴 Kolo ${roundId}: Izvlačenje!`);
@@ -152,19 +154,23 @@ async function runGame() {
             do { n = Math.floor(Math.random() * 80) + 1; } while (drawn.includes(n));
             drawn.push(n);
 
-            // Ažuriraj bazu (da refresh stranice radi)
+            // Ažuriraj bazu (za one koji tek uđu na sajt)
             await roundRef.update({ drawnAnimated: drawn });
 
-            // NAJBITNIJE: Socket šalje broj SVIMA momentalno
-            io.emit("newBall", { number: n, allDrawn: drawn, index: i + 1 });
+            // SOCKET EMIT: Šalje lopticu klijentu ZA ANIMACIJU
+            io.emit("ballDrawn", { 
+                number: n, 
+                allDrawn: drawn, 
+                index: i // Šaljemo index 0-19 da klijent zna kad da očisti grid
+            });
 
             console.log(`Loptica ${i+1}: ${n}`);
             await sleep(DRAW_INTERVAL);
         }
 
-        // --- KORAK 3: OBRAČUN (CALCULATING) ---
+        // --- KORAK 3: OBRAČUN ---
         await roundRef.update({ status: "calculating", drawnNumbers: drawn });
-        io.emit("roundUpdate", { status: "calculating" });
+        io.emit("roundUpdate", { status: "calculating", roundId: roundId });
 
         await processTickets(roundId, drawn);
 
@@ -175,8 +181,9 @@ async function runGame() {
             createdAt: Date.now()
         });
 
+        io.emit("roundFinished", { roundId: roundId });
         console.log(`✅ Kolo ${roundId} završeno.`);
-        await sleep(10000); // Pauza od 10s između kola
+        await sleep(10000); // 10s pauze pre novog kola
     }
 }
 
