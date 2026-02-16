@@ -5,7 +5,7 @@ const { Server } = require("socket.io");
 
 const app = express();
 const server = http.createServer(app);
-const db = admin.database(); // OVO MORA BITI DEFINISANO DA BI 'db' RADILO
+
 // Socket.io setup - Optimizovano za real-time tajmer i animacije
 const io = new Server(server, {
     cors: {
@@ -43,7 +43,7 @@ if (serviceAccount && !admin.apps.length) {
     });
 }
 
-
+const db = admin.database(); // OVO MORA BITI DEFINISANO DA BI 'db' RADILO
 const roundRef = db.ref("currentRound");
 
 // 2. KONSTANTE
