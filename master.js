@@ -271,6 +271,27 @@ io.on("connection", async (socket) => {
             if (!moneyDeducted) socket.emit("ticketError", "Greška na serveru.");
         }
     });
+
+    // master.js - UNUTAR io.on("connection")
+
+const sendGameState = () => {
+    socket.emit("gameUpdate", {
+        roundId: currentRoundId,
+        status: currentRoundStatus,
+        countdown: countdown,
+        drawnNumbers: drawnNumbers,
+        lastNumbers: lastRoundNumbers
+    });
+};
+
+// 1. Pošalji odmah pri konekciji
+sendGameState();
+
+// 2. Pošalji kada klijent zatraži (visibility change ili refresh)
+socket.on("requestSync", () => {
+    console.log(`[SYNC] Klijent ${socket.id} traži osvežavanje podataka.`);
+    sendGameState();
+});
 });
 
 const PORT = process.env.PORT || 3000;
