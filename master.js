@@ -129,6 +129,7 @@ io.on("connection", (socket) => {
         roundId: currentRoundId,
         status: currentRoundStatus,
         timeLeft: countdown,
+        history: roundHistory, // Ovo je ključno!
         // Ako je pauza, pošalji prošle brojeve, ako je izvlačenje, pošalji trenutne
         drawnNumbers: currentRoundStatus === "waiting" ? lastRoundNumbers : drawnNumbers
     });
