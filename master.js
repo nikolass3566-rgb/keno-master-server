@@ -306,30 +306,33 @@ io.on("connection", async (socket) => {
 
 
  // Funkcija koja prikuplja SVE podatke i šalje ih (za sync i za admina)
-    const sendFullSync = async () => {
-        try {
-            // Povuci sve bitne grane iz baze odjednom
-            const [gameSnap, statsSnap] = await Promise.all([
-                db.ref("gameData").get(),
-                db.ref("admin/stats").get()
-            ]);
+   // master.js (Linija oko 230)
 
-            const gameData = gameSnap.val() || {};
-            const stats = statsSnap.val() || { totalIn: 0, totalOut: 0, profit: 0 };
+const sendFullSync = async () => {
+    try {
+        const [gameSnap, statsSnap] = await Promise.all([
+            db.ref("gameData").get(),
+            db.ref("admin/stats").get()
+        ]);
 
-            // Šaljemo JEDAN paket koji sadrži sve za Admina i Igrača
-            socket.emit("gameUpdate", {
-                roundId: currentRoundId,
-                status: currentRoundStatus,
-                countdown: countdown,
-                jackpot: gameData.jackpot || 0,
-                bonus: gameData.bonusPot || 0,
-                stats: stats // OVO JE KLJUČ ZA ADMINA
-            });
-        } catch (err) {
-            console.error("Greška pri sync-u:", err);
-        }
-    };
+        const gameData = gameSnap.val() || {};
+        const stats = statsSnap.val() || { totalIn: 0, totalOut: 0, profit: 0 };
+
+        socket.emit("gameUpdate", {
+            roundId: currentRoundId,
+            status: currentRoundStatus,
+            countdown: countdown,
+            jackpot: gameData.jackpot || 0,
+            bonus: gameData.bonusPot || 0,
+            // DODAJ OVE DVE LINIJE ISPOD:
+            drawnNumbers: drawnNumbers,       // Trenutno izvučeni u rundi
+            lastNumbers: lastRoundNumbers,    // Brojevi iz prošle runde
+            stats: stats
+        });
+    } catch (err) {
+        console.error("Greška pri sync-u:", err);
+    }
+};
 
     // Odmah pošalji podatke čim se admin/igrač poveže
     await sendFullSync();
