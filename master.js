@@ -217,58 +217,77 @@ io.on("connection", (socket) => {
     // master.js - Unutar io.on("connection", (socket) => { ... })
 
     socket.on("placeTicket", async (data) => {
-        const { userId, numbers, amount, roundId } = data;
-        const ticketAmount = Number(amount);
+    const { userId, numbers, amount, roundId } = data;
+    const ticketAmount = Number(amount);
 
-        // Osnovna provera podataka da izbegnemo NaN u bazi
-        if (isNaN(ticketAmount) || ticketAmount <= 0) {
-            return socket.emit("ticketError", "Nevalidan iznos uplate!");
+    if (isNaN(ticketAmount) || ticketAmount <= 0) {
+        return socket.emit("ticketError", "Nevalidan iznos uplate!");
+    }
+
+    // Varijabla koja prati da li smo skinuli novac
+    let moneyDeducted = false;
+
+    try {
+        const userRef = db.ref(`users/${userId}/balance`);
+
+        // 1. Korišćenje transakcije za sigurno skidanje novca
+        const result = await userRef.transaction((currentBalance) => {
+            let balance = (currentBalance === null) ? 0 : Number(currentBalance);
+            if (balance < ticketAmount) {
+                return; // Prekida transakciju ako nema dovoljno para
+            }
+            return balance - ticketAmount;
+        });
+
+        // Provera da li je transakcija uspela
+        if (!result.committed) {
+            return socket.emit("ticketError", "Nemaš dovoljno novca ili je greška u nalogu!");
         }
 
-        try {
-            const userRef = db.ref(`users/${userId}/balance`);
+        // AKO SMO OVDE - NOVAC JE SKINUT
+        moneyDeducted = true;
+        const finalBalance = result.snapshot.val();
 
-            // Korišćenje transakcije za sigurno skidanje novca
-            const result = await userRef.transaction((currentBalance) => {
-                if (currentBalance === null) return 0; // Ako korisnik ne postoji
-                if (currentBalance < ticketAmount) {
-                    return; // Prekida transakciju ako nema dovoljno para
-                }
-                return currentBalance - ticketAmount;
-                
-            });
+        // 2. Upiši tiket (Koristimo await da budemo sigurni da je upisano)
+        const newTicketRef = db.ref(`tickets`).push();
+        await newTicketRef.set({
+            userId: userId,
+            numbers: numbers,
+            amount: ticketAmount,
+            roundId: roundId,
+            status: "pending",
+            createdAt: Date.now()
+        });
 
-            // Provera da li je transakcija uspela (committed)
-            if (!result.committed) {
-                return socket.emit("ticketError", "Nemaš dovoljno novca ili je greška u nalogu!");
-            }
+        // 3. Ažuriraj statistiku i fondove (Jackpot/Bonus) istovremeno
+        // Koristimo Promise.all da ubrzamo proces
+        await Promise.all([
+            updateGlobalStats(ticketAmount, 0),
+            db.ref("gameData/jackpot").transaction(j => (j || 0) + (ticketAmount * 0.01)),
+            db.ref("gameData/bonusPot").transaction(b => (b || 0) + (ticketAmount * 0.01))
+        ]);
 
-            const finalBalance = result.snapshot.val();
+        // 4. JAVI USPEH - Ovo je ključno!
+        socket.emit("balanceUpdate", finalBalance);
+        socket.emit("ticketSuccess", { 
+            msg: "Tiket uspešno uplaćen!", 
+            balance: finalBalance 
+        });
 
-            // Upiši tiket
-            const newTicketRef = db.ref(`tickets`).push();
-            await newTicketRef.set({
-                userId: userId,
-                numbers: numbers,
-                amount: ticketAmount,
-                roundId: roundId,
-                status: "pending",
-                createdAt: Date.now()
-            });
-                await updateGlobalStats(ticketAmount, 0); // Dodajemo u "totalIn"
-            // OBAVEZNO: Javi klijentu novo stanje balansa odmah
-            socket.emit("balanceUpdate", finalBalance);
+        console.log(`[UPLATA SUCCESS] Korisnik ${userId}: -${ticketAmount} RSD. Novo stanje: ${finalBalance}`);
 
-            console.log(`[UPLATA SUCCESS] Korisnik ${userId}: -${ticketAmount} RSD. Novo stanje: ${finalBalance}`);
-
-        } catch (err) {
-            console.error("Kritična greška pri uplati:", err);
+    } catch (err) {
+        console.error("Kritična greška pri uplati:", err);
+        
+        // Pametna poruka o grešci
+        if (moneyDeducted) {
+            // Ako je novac skinut, a nešto drugo je puklo, ne plašimo korisnika da pare nisu skinute
+            socket.emit("ticketError", "Tiket je uplaćen, ali postoji problem sa prikazom. Osvežite stranicu.");
+        } else {
             socket.emit("ticketError", "Greška na serveru. Novac nije skinut.");
         }
-        // Dodaj u Jackpot i Bonus fond (iz prethodne logike)
-        await db.ref("gameData/jackpot").transaction(j => (j || 0) + (ticketAmount * 0.01));
-        await db.ref("gameData/bonusPot").transaction(b => (b || 0) + (ticketAmount * 0.01));
-    });
+    }
+});
 
     // 2. DODAJ OVO: Slušalac za promenu taba (Visibility API sinhronizacija)
     socket.on("requestSync", () => {
