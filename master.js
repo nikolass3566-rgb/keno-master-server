@@ -47,29 +47,58 @@ async function processTickets(roundId, finalNumbers) {
     console.log(`[OBRAČUN] Kolo: ${roundId}`);
     try {
         const snapshot = await db.ref("tickets").orderByChild("roundId").equalTo(roundId).once("value");
-        if (!snapshot.exists()) return;
+        if (!snapshot.exists()) {
+            console.log(`[OBRAČUN] Nema tiketa za kolo ${roundId}`);
+            return;
+        }
 
         const tickets = snapshot.val();
+        const updates = {}; // Koristimo multi-update za veću brzinu
+
         for (const id in tickets) {
             const t = tickets[id];
-            const hits = t.numbers.filter(n => finalNumbers.includes(n));
-            const winAmount = Math.floor(t.amount * (KENO_PAYTABLE[hits.length] || 0));
             
+            // 1. Broj odigranih i broj pogođenih brojeva
+            const totalPlayed = t.numbers.length; 
+            const hitsArray = t.numbers.filter(n => finalNumbers.includes(n));
+            const hitCount = hitsArray.length;
+
+            // 2. NOVA LOGIKA KVOTE: KENO_PAYTABLE[koliko_je_igrao][koliko_je_pogodio]
+            let quota = 0;
+            if (KENO_PAYTABLE[totalPlayed] && KENO_PAYTABLE[totalPlayed][hitCount] !== undefined) {
+                quota = KENO_PAYTABLE[totalPlayed][hitCount];
+            }
+
+            // 3. Računanje uz Number() konverziju da izbegnemo NaN
+            const stake = Number(t.amount) || 0;
+            const winAmount = Math.floor(stake * quota);
+
+            // Sigurnosni check pre upisa u bazu
+            if (isNaN(winAmount)) {
+                console.error(`[CRITICAL] NaN detektovan za tiket ${id}! Iznos: ${t.amount}, Kvota: ${quota}`);
+                continue; // Preskoči ovaj tiket da ne srušiš ceo obračun
+            }
+
             const status = winAmount > 0 ? "win" : "lose";
 
-            // Update tiketa u bazi
+            // 4. Update tiketa
             await db.ref(`tickets/${id}`).update({
                 status: status,
                 winAmount: winAmount,
-                hits: hits // Da bi klijent mogao da ih pozlati
+                hits: hitsArray 
             });
 
-            // Isplata korisniku
+            // 5. Isplata korisniku
             if (winAmount > 0) {
-                await db.ref(`users/${t.userId}/balance`).transaction(b => (b || 0) + winAmount);
+                console.log(`[ISPLATA] Korisnik ${t.userId} dobio ${winAmount} RSD na kolu ${roundId}`);
+                await db.ref(`users/${t.userId}/balance`).transaction(currentBalance => {
+                    return (Number(currentBalance) || 0) + winAmount;
+                });
             }
         }
-    } catch (e) { console.error("Greška u obračunu:", e); }
+    } catch (e) { 
+        console.error("Kritična greška u obračunu:", e); 
+    }
 }
 
 async function runGame() {
