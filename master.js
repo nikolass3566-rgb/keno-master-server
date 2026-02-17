@@ -427,14 +427,49 @@ async function updateGlobalStats(addIn, addOut) {
 
 // master.js
 
-socket.on("requestSync", () => {
-    // Odmah pošalji trenutno stanje klijentu koji je tražio
-    socket.emit("gameUpdate", {
-        roundId: currentRoundId,
-        status: currentRoundStatus,
-        countdown: countdown,
-        drawnNumbers: drawnNumbers,
-        lastNumbers: lastRoundNumbers
+// master.js
+
+io.on("connection", async (socket) => {
+    console.log("Povezan klijent/admin:", socket.id);
+
+    // Funkcija koja prikuplja SVE podatke i šalje ih (za sync i za admina)
+    const sendFullSync = async () => {
+        try {
+            // Povuci sve bitne grane iz baze odjednom
+            const [gameSnap, statsSnap] = await Promise.all([
+                db.ref("gameData").get(),
+                db.ref("admin/stats").get()
+            ]);
+
+            const gameData = gameSnap.val() || {};
+            const stats = statsSnap.val() || { totalIn: 0, totalOut: 0, profit: 0 };
+
+            // Šaljemo JEDAN paket koji sadrži sve za Admina i Igrača
+            socket.emit("gameUpdate", {
+                roundId: currentRoundId,
+                status: currentRoundStatus,
+                countdown: countdown,
+                jackpot: gameData.jackpot || 0,
+                bonus: gameData.bonusPot || 0,
+                stats: stats // OVO JE KLJUČ ZA ADMINA
+            });
+        } catch (err) {
+            console.error("Greška pri sync-u:", err);
+        }
+    };
+
+    // Odmah pošalji podatke čim se admin/igrač poveže
+    await sendFullSync();
+
+    // Reaguj na ručni zahtev za osvežavanje (requestSync)
+    socket.on("requestSync", async () => {
+        await sendFullSync();
     });
-    console.log(`[SYNC] Poslati podaci klijentu: ${socket.id}`);
+
+    // Reset stats komanda sa Admin panela
+    socket.on("adminResetStats", async () => {
+        const freshStats = { totalIn: 0, totalOut: 0, profit: 0 };
+        await db.ref("admin/stats").set(freshStats);
+        io.emit("adminStatsUpdate", freshStats); // Javi svim adminima
+    });
 });
