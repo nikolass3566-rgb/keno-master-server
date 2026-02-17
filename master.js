@@ -392,3 +392,17 @@ async function updateGlobalStats(addIn, addOut) {
         console.error("Kritična greška u updateGlobalStats:", e);
     }
 }
+
+// master.js
+
+socket.on("requestSync", () => {
+    // Odmah pošalji trenutno stanje klijentu koji je tražio
+    socket.emit("gameUpdate", {
+        roundId: currentRoundId,
+        status: currentRoundStatus,
+        countdown: countdown,
+        drawnNumbers: drawnNumbers,
+        lastNumbers: lastRoundNumbers
+    });
+    console.log(`[SYNC] Poslati podaci klijentu: ${socket.id}`);
+});
