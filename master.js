@@ -44,6 +44,7 @@ const sleep = (ms) => new Promise(res => setTimeout(res, ms));
 
 // OBRAČUN DOBITAKA
 async function processTickets(roundId, finalNumbers) {
+    let roundTotalWin = 0; // Pratimo koliko isplaćujemo u ovom kolu
     console.log(`[OBRAČUN] Kolo: ${roundId}`);
     try {
         const snapshot = await db.ref("tickets").orderByChild("roundId").equalTo(roundId).once("value");
@@ -90,15 +91,35 @@ async function processTickets(roundId, finalNumbers) {
 
             // 5. Isplata korisniku
             if (winAmount > 0) {
+                roundTotalWin += winAmount;
                 console.log(`[ISPLATA] Korisnik ${t.userId} dobio ${winAmount} RSD na kolu ${roundId}`);
                 await db.ref(`users/${t.userId}/balance`).transaction(currentBalance => {
                     return (Number(currentBalance) || 0) + winAmount;
                 });
             }
+           
         }
+         // Na kraju funkcije upiši koliko je ukupno otišlo iz kase
+    if (roundTotalWin > 0) {
+        await updateGlobalStats(0, roundTotalWin); // Dodajemo u "totalOut"
+    }
     } catch (e) {
         console.error("Kritična greška u obračunu:", e);
     }
+    let roundIn = 0;
+    let roundOut = 0;
+
+    for (const id in tickets) {
+        const t = tickets[id];
+        roundIn += Number(t.amount); // Sabiramo uplate
+
+        if (winAmount > 0) {
+            roundOut += winAmount; // Sabiramo isplate
+        }
+    }
+
+    // Ažuriraj admin statistiku u bazi
+    await updateGlobalStats(roundIn, roundOut);
 }
 
 async function runGame() {
@@ -170,6 +191,10 @@ async function runGame() {
         // Čuvamo ID u bazu da bi se restart servera nastavio odavde
         await db.ref("lastRoundId").set(currentRoundId);
     }
+    // master.js unutar runGame() petlje...
+
+await processTickets(currentRoundId, drawnNumbers); // Prvo obradi tikete
+await checkSpecialPrizes(); // Zatim vidi da li neko dobija bonus/jackpot na osnovu novog profita
 }
 
 /**
@@ -245,6 +270,7 @@ io.on("connection", (socket) => {
                     return; // Prekida transakciju ako nema dovoljno para
                 }
                 return currentBalance - ticketAmount;
+                
             });
 
             // Provera da li je transakcija uspela (committed)
@@ -264,7 +290,7 @@ io.on("connection", (socket) => {
                 status: "pending",
                 createdAt: Date.now()
             });
-
+                await updateGlobalStats(ticketAmount, 0); // Dodajemo u "totalIn"
             // OBAVEZNO: Javi klijentu novo stanje balansa odmah
             socket.emit("balanceUpdate", finalBalance);
 
@@ -278,7 +304,6 @@ io.on("connection", (socket) => {
         await db.ref("gameData/jackpot").transaction(j => (j || 0) + (ticketAmount * 0.01));
         await db.ref("gameData/bonusPot").transaction(b => (b || 0) + (ticketAmount * 0.01));
     });
-
 
     // 2. DODAJ OVO: Slušalac za promenu taba (Visibility API sinhronizacija)
     socket.on("requestSync", () => {
@@ -307,3 +332,55 @@ db.ref("tickets").on("child_added", async (snapshot) => {
         await snapshot.ref.update({ roundId: currentRoundId });
     }
 });
+
+
+async function generateSmartNumbers() {
+    // 1. Povuci statistiku iz baze
+    const statsSnap = await db.ref("admin/stats").get();
+    const stats = statsSnap.val() || { totalIn: 0, totalOut: 0, profit: 0 };
+    
+    // Izračunaj trenutni RTP (isplaćeno / uplaćeno)
+    const currentRTP = stats.totalIn > 0 ? (stats.totalOut / stats.totalIn) * 100 : 0;
+
+    let bestSet = [];
+    let lowestPayout = Infinity;
+
+    // 2. Simuliraj izvlačenja
+    for (let i = 0; i < 200; i++) { // Probaj 20 različitih kombinacija
+        let candidate = generateRandom20();
+        let potentialPayout = await calculateSimulatedPayout(candidate);
+
+        // Ako je profit nizak (RTP > 77%), forsiraj kombinaciju sa najmanjom isplatom
+        if (currentRTP > 77) {
+            if (potentialPayout < lowestPayout) {
+                lowestPayout = potentialPayout;
+                bestSet = candidate;
+            }
+        } else {
+            // Ako smo u dobrom profitu, daj bilo koju fer kombinaciju
+            return candidate; 
+        }
+    }
+    return bestSet;
+}
+// master.js
+
+async function checkSpecialPrizes() {
+    const statsSnap = await db.ref("admin/stats").get();
+    const stats = statsSnap.val() || { profit: 0 };
+    
+    const gameDataSnap = await db.ref("gameData").get();
+    const gameData = gameDataSnap.val() || { jackpot: 0, bonusPot: 0 };
+
+    // 1. JACKPOT: Puca samo ako je profit preko 100,000 RSD i jackpot preko 5,000
+    if (stats.profit > 100000 && gameData.jackpot > 5000) {
+        if (Math.random() < 0.05) { // 5% šanse svako kolo kada su uslovi ispunjeni
+            await triggerJackpotPayback(gameData.jackpot);
+        }
+    }
+
+    // 2. BONUS: Puca ako je profit preko 20,000 RSD i bonusPot prešao limit
+    if (stats.profit > 20000 && gameData.bonusPot > 10000) {
+        await triggerBonusRound(gameData.bonusPot);
+    }
+}
