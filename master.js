@@ -93,22 +93,33 @@ async function runGame() {
             await sleep(3000);
         }
 
-        // --- FAZA OBRAČUNA (CALCULATING) ---
+       // ... (kraj izvlačenja)
         currentRoundStatus = "calculating";
-        lastRoundNumbers = [...drawnNumbers];
-        
-        // Obrađujemo tikete sa ID-om koji je bio aktuelan tokom celog ovog ciklusa
+        lastRoundNumbers = [...drawnNumbers]; 
         await processTickets(currentRoundId, drawnNumbers);
         
-        io.emit("roundFinished", { roundId: currentRoundId, allNumbers: drawnNumbers });
+        // Šaljemo finalne brojeve i obaveštenje da je KRAJ
+        io.emit("roundFinished", { 
+            roundId: currentRoundId, 
+            allNumbers: drawnNumbers 
+        });
 
-        // --- PAUZA PRE NOVOG KOLA ---
-        await sleep(10000); 
+        await sleep(10000); // 10 sekundi pauze da ljudi vide rezultate
 
-        // TEK SADA, nakon što je sve završeno, povećavamo ID za sledeći krug
+        // KLJUČNA IZMENA: Povećavamo ID i ODMAH javljamo klijentima novo stanje
         currentRoundId++;
         await db.ref("lastRoundId").set(currentRoundId);
-        console.log(`[SYSTEM] Prelazak na novo kolo: ${currentRoundId}`);
+        
+        // Resetujemo parametre za novo kolo
+        drawnNumbers = [];
+        currentRoundStatus = "waiting";
+        
+        // Obaveštavamo klijente da je počelo novo čekanje sa NOVIM ID-om
+        io.emit("roundUpdate", { 
+            roundId: currentRoundId, 
+            status: "waiting", 
+            timeLeft: 90 
+        });
     }
 }
 
