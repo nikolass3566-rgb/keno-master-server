@@ -58,24 +58,30 @@ async function processTickets(roundId, finalNumbers) {
 }
 
 async function runGame() {
-    // Inicijalni Round ID
+    // 1. Inicijalizacija - Uzmi poslednji ID iz baze samo JEDNOM pri startu servera
     const snap = await db.ref("lastRoundId").get();
     currentRoundId = snap.val() || 1000;
 
+    console.log(`[START] Igra pokrenuta od kola: ${currentRoundId}`);
+
     while (true) {
-        currentRoundId++;
-        await db.ref("lastRoundId").set(currentRoundId);
+        // --- FAZA ČEKANJA (WAITING) ---
+        // Na početku petlje, currentRoundId je onaj koji je upravo postavljen
         drawnNumbers = [];
         currentRoundStatus = "waiting";
 
-        // 1. COUNTDOWN FAZA
         for (let s = 90; s >= 0; s--) {
             countdown = s;
-            io.emit("roundUpdate", { roundId: currentRoundId, status: "waiting", timeLeft: s });
+            // Šaljemo SVIMA informaciju o tekućem kolu za koje mogu da uplaćuju
+            io.emit("roundUpdate", { 
+                roundId: currentRoundId, 
+                status: "waiting", 
+                timeLeft: s 
+            });
             await sleep(1000);
         }
 
-        // 2. IZVLAČENJE FAZA
+        // --- FAZA IZVLAČENJA (RUNNING) ---
         currentRoundStatus = "running";
         io.emit("roundUpdate", { status: "running", roundId: currentRoundId });
 
@@ -87,13 +93,22 @@ async function runGame() {
             await sleep(3000);
         }
 
-        // 3. KRAJ I OBRAČUN
+        // --- FAZA OBRAČUNA (CALCULATING) ---
         currentRoundStatus = "calculating";
-        lastRoundNumbers = [...drawnNumbers]; // Čuvamo za "pauza" prikaz
+        lastRoundNumbers = [...drawnNumbers];
+        
+        // Obrađujemo tikete sa ID-om koji je bio aktuelan tokom celog ovog ciklusa
         await processTickets(currentRoundId, drawnNumbers);
         
         io.emit("roundFinished", { roundId: currentRoundId, allNumbers: drawnNumbers });
-        await sleep(10000); // 10 sekundi prikaza rezultata pre nove runde
+
+        // --- PAUZA PRE NOVOG KOLA ---
+        await sleep(10000); 
+
+        // TEK SADA, nakon što je sve završeno, povećavamo ID za sledeći krug
+        currentRoundId++;
+        await db.ref("lastRoundId").set(currentRoundId);
+        console.log(`[SYSTEM] Prelazak na novo kolo: ${currentRoundId}`);
     }
 }
 
