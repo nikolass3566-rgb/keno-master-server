@@ -6,7 +6,10 @@ const { Server } = require("socket.io");
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
-
+// Dodaj ovo pre nego što pokreneš server (server.listen)
+app.get("/", (req, res) => {
+    res.status(200).send("Server je aktivan i vrti runde!");
+});
 // FIREBASE KONFIGURACIJA (Preuzima iz env ili fajla)
 let serviceAccount = JSON.parse(process.env.FIREBASE_CONFIG_JSON);
 if (serviceAccount.private_key) serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
