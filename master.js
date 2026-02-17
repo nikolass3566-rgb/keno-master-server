@@ -29,16 +29,16 @@ let countdown = 90;
 let roundHistory = {}; // OVO MORA BITI OVDE DEFINISANO
 
 const KENO_PAYTABLE = {
-  1:  {0:0, 1:2},
-  2:  {0:0, 1:1, 2:5},
-  3:  {0:0, 1:0, 2:2, 3:10},
-  4:  {0:0, 1:0, 2:1, 3:5, 4:15},
-  5:  {0:0, 1:0, 2:0, 3:2, 4:10, 5:50},
-  6:  {0:0, 1:0, 2:0, 3:1, 4:6, 5:25, 6:120},
-  7:  {0:0, 1:0, 2:0, 3:1, 4:5, 5:25, 6:100, 7:400},
-  8:  {0:0, 1:0, 2:0, 3:1, 4:0, 5:2, 6:75, 7:250, 8:800},
-  9:  {0:0, 1:0, 2:0, 3:0, 4:2, 5:4, 6:80, 7:300, 8:1200, 9:4000},
-  10: {0:0, 1:0, 2:0, 3:0, 4:4, 5:8, 6:100, 7:400, 8:2000, 9:5000, 10:10000}
+    1: { 0: 0, 1: 2 },
+    2: { 0: 0, 1: 1, 2: 5 },
+    3: { 0: 0, 1: 0, 2: 2, 3: 10 },
+    4: { 0: 0, 1: 0, 2: 1, 3: 5, 4: 15 },
+    5: { 0: 0, 1: 0, 2: 0, 3: 2, 4: 10, 5: 50 },
+    6: { 0: 0, 1: 0, 2: 0, 3: 1, 4: 6, 5: 25, 6: 120 },
+    7: { 0: 0, 1: 0, 2: 0, 3: 1, 4: 5, 5: 25, 6: 100, 7: 400 },
+    8: { 0: 0, 1: 0, 2: 0, 3: 1, 4: 0, 5: 2, 6: 75, 7: 250, 8: 800 },
+    9: { 0: 0, 1: 0, 2: 0, 3: 0, 4: 2, 5: 4, 6: 80, 7: 300, 8: 1200, 9: 4000 },
+    10: { 0: 0, 1: 0, 2: 0, 3: 0, 4: 4, 5: 8, 6: 100, 7: 400, 8: 2000, 9: 5000, 10: 10000 }
 };
 const sleep = (ms) => new Promise(res => setTimeout(res, ms));
 
@@ -57,9 +57,9 @@ async function processTickets(roundId, finalNumbers) {
 
         for (const id in tickets) {
             const t = tickets[id];
-            
+
             // 1. Broj odigranih i broj pogođenih brojeva
-            const totalPlayed = t.numbers.length; 
+            const totalPlayed = t.numbers.length;
             const hitsArray = t.numbers.filter(n => finalNumbers.includes(n));
             const hitCount = hitsArray.length;
 
@@ -85,7 +85,7 @@ async function processTickets(roundId, finalNumbers) {
             await db.ref(`tickets/${id}`).update({
                 status: status,
                 winAmount: winAmount,
-                hits: hitsArray 
+                hits: hitsArray
             });
 
             // 5. Isplata korisniku
@@ -96,8 +96,8 @@ async function processTickets(roundId, finalNumbers) {
                 });
             }
         }
-    } catch (e) { 
-        console.error("Kritična greška u obračunu:", e); 
+    } catch (e) {
+        console.error("Kritična greška u obračunu:", e);
     }
 }
 
@@ -114,10 +114,10 @@ async function runGame() {
 
         for (let s = 90; s >= 0; s--) {
             countdown = s;
-            io.emit("roundUpdate", { 
-                roundId: currentRoundId, 
-                status: "waiting", 
-                timeLeft: s 
+            io.emit("roundUpdate", {
+                roundId: currentRoundId,
+                status: "waiting",
+                timeLeft: s
             });
             await sleep(1000);
         }
@@ -141,9 +141,9 @@ async function runGame() {
 
         // --- FAZA OBRAČUNA (CALCULATING) ---
         currentRoundStatus = "calculating";
-        
+
         // 1. Sačuvaj u lokalnu istoriju (za brzi AJAX/Socket pristup)
-        roundHistory[currentRoundId] = [...drawnNumbers]; 
+        roundHistory[currentRoundId] = [...drawnNumbers];
         let keys = Object.keys(roundHistory);
         if (keys.length > 20) delete roundHistory[keys[0]];
 
@@ -155,12 +155,12 @@ async function runGame() {
 
         // 3. Pokreni obračun tiketa (ona sređena funkcija sa Number() zaštitom)
         // Ovo rešava problem sa NaN i Pending statusom
-        await processTickets(currentRoundId, drawnNumbers); 
+        await processTickets(currentRoundId, drawnNumbers);
 
         // 4. Javi klijentima da je gotovo
-        io.emit("roundFinished", { 
-            roundId: currentRoundId, 
-            allNumbers: drawnNumbers 
+        io.emit("roundFinished", {
+            roundId: currentRoundId,
+            allNumbers: drawnNumbers
         });
 
         await sleep(10000); // Pauza od 10s za gledanje rezultata
@@ -226,41 +226,72 @@ io.on("connection", (socket) => {
     });
     // master.js - Unutar io.on("connection", (socket) => { ... })
 
-socket.on("placeTicket", async (data) => {
-    const { userId, numbers, amount, roundId } = data;
+    socket.on("placeTicket", async (data) => {
+        const { userId, numbers, amount, roundId } = data;
+        const ticketAmount = Number(amount);
 
-    try {
-        // 1. Provera balansa u Firebase-u
-        const userRef = db.ref(`users/${userId}`);
-        const userSnap = await userRef.once("value");
-        const userData = userSnap.val();
-
-        if (!userData || (userData.balance < amount)) {
-            return socket.emit("ticketError", "Nemaš dovoljno novca na računu!");
+        // Osnovna provera podataka da izbegnemo NaN u bazi
+        if (isNaN(ticketAmount) || ticketAmount <= 0) {
+            return socket.emit("ticketError", "Nevalidan iznos uplate!");
         }
 
-        // 2. Oduzmi novac (Ovo je sigurno jer server kontroliše)
-        const newBalance = userData.balance - amount;
-        await userRef.update({ balance: newBalance });
+        try {
+            const userRef = db.ref(`users/${userId}/balance`);
 
-        // 3. UPIŠI TIKET U GLOBALNU LISTU (Ovo aktivira loadUserTickets kod klijenta)
-        const newTicketRef = db.ref(`tickets`).push();
-        await newTicketRef.set({
-            userId: userId,
-            numbers: numbers,
-            amount: amount,
-            roundId: roundId,
-            status: "pending",
-            createdAt: Date.now()
+            // Korišćenje transakcije za sigurno skidanje novca
+            const result = await userRef.transaction((currentBalance) => {
+                if (currentBalance === null) return 0; // Ako korisnik ne postoji
+                if (currentBalance < ticketAmount) {
+                    return; // Prekida transakciju ako nema dovoljno para
+                }
+                return currentBalance - ticketAmount;
+            });
+
+            // Provera da li je transakcija uspela (committed)
+            if (!result.committed) {
+                return socket.emit("ticketError", "Nemaš dovoljno novca ili je greška u nalogu!");
+            }
+
+            const finalBalance = result.snapshot.val();
+
+            // Upiši tiket
+            const newTicketRef = db.ref(`tickets`).push();
+            await newTicketRef.set({
+                userId: userId,
+                numbers: numbers,
+                amount: ticketAmount,
+                roundId: roundId,
+                status: "pending",
+                createdAt: Date.now()
+            });
+
+            // OBAVEZNO: Javi klijentu novo stanje balansa odmah
+            socket.emit("balanceUpdate", finalBalance);
+
+            console.log(`[UPLATA SUCCESS] Korisnik ${userId}: -${ticketAmount} RSD. Novo stanje: ${finalBalance}`);
+
+        } catch (err) {
+            console.error("Kritična greška pri uplati:", err);
+            socket.emit("ticketError", "Greška na serveru. Novac nije skinut.");
+        }
+        // Dodaj u Jackpot i Bonus fond (iz prethodne logike)
+        await db.ref("gameData/jackpot").transaction(j => (j || 0) + (ticketAmount * 0.01));
+        await db.ref("gameData/bonusPot").transaction(b => (b || 0) + (ticketAmount * 0.01));
+    });
+
+
+    // 2. DODAJ OVO: Slušalac za promenu taba (Visibility API sinhronizacija)
+    socket.on("requestSync", () => {
+        console.log(`[SYNC] Korisnik osvežava tab za kolo ${currentRoundId}`);
+        socket.emit("initialState", {
+            roundId: currentRoundId,
+            status: currentRoundStatus,
+            timeLeft: countdown,
+            history: roundHistory,
+            drawnNumbers: currentRoundStatus === "waiting" ? lastRoundNumbers : drawnNumbers
         });
+    });
 
-        console.log(`[UPLATA] Korisnik ${userId} uplatio ${amount} RSD za kolo ${roundId}`);
-
-    } catch (err) {
-        console.error("Greška pri uplati:", err);
-        socket.emit("ticketError", "Serverska greška pri obradi tiketa.");
-    }
-});
 });
 
 const PORT = process.env.PORT || 3000;
