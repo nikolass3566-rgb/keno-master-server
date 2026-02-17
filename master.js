@@ -204,105 +204,73 @@ function generateRandom20() {
     }
     return arr;
 }
-io.on("connection", (socket) => {
-    // SINHRONIZACIJA: Šaljemo podatke zavisno od toga šta se trenutno dešava
-    socket.emit("initialState", {
-        roundId: currentRoundId,
-        status: currentRoundStatus,
-        timeLeft: countdown,
-        history: roundHistory, // Ovo je ključno!
-        // Ako je pauza, pošalji prošle brojeve, ako je izvlačenje, pošalji trenutne
-        drawnNumbers: currentRoundStatus === "waiting" ? lastRoundNumbers : drawnNumbers
-    });
-    // master.js - Unutar io.on("connection", (socket) => { ... })
+// master.js
+
+io.on("connection", async (socket) => {
+    console.log("Klijent povezan:", socket.id);
+
+    // ODMAH pošalji trenutne vrijednosti Jackpot-a i Bonusa čim uđe na sajt
+    try {
+        const gameDataSnap = await db.ref("gameData").get();
+        if (gameDataSnap.exists()) {
+            socket.emit("liveUpdate", {
+                jackpot: gameDataSnap.val().jackpot || 0,
+                bonus: gameDataSnap.val().bonusPot || 0 // Šaljemo kao 'bonus' radi script.js
+            });
+        }
+    } catch (e) { console.log("Greška pri početnom slanju:", e); }
 
     socket.on("placeTicket", async (data) => {
-    const { userId, numbers, amount, roundId } = data;
-    const ticketAmount = Number(amount);
+        const { userId, numbers, amount, roundId } = data;
+        const ticketAmount = Number(amount);
+        let moneyDeducted = false;
 
-    if (isNaN(ticketAmount) || ticketAmount <= 0) {
-        return socket.emit("ticketError", "Nevalidan iznos uplate!");
-    }
+        try {
+            const userRef = db.ref(`users/${userId}/balance`);
+            const result = await userRef.transaction(current => {
+                if (current === null) return 0;
+                let bal = Number(current);
+                if (bal < ticketAmount) return;
+                return bal - ticketAmount;
+            });
 
-    let moneyDeducted = false;
+            if (!result.committed) return socket.emit("ticketError", "Nedovoljno novca!");
 
-    try {
-        const userRef = db.ref(`users/${userId}/balance`);
+            moneyDeducted = true;
+            const finalBalance = result.snapshot.val();
 
-        const result = await userRef.transaction((currentValue) => {
-            // FIREBASE BITNO: Ako je currentValue null, transakcija se inicijalizuje.
-            // Ne smijemo prekinuti (return), nego dozvoliti bazi da nam "javi" pravu vrijednost.
-            if (currentValue === null) {
-                return 0; 
-            }
+            // 1. UPIŠI TIKET (Glavni prioritet)
+            const newTicketRef = db.ref(`tickets`).push();
+            await newTicketRef.set({
+                userId, numbers, amount: ticketAmount, roundId,
+                status: "pending", createdAt: Date.now()
+            });
 
-            let balance = Number(currentValue);
-            if (balance < ticketAmount) {
-                // Tek ovdje prekidamo ako stvarno nema para
-                return; 
-            }
-            return balance - ticketAmount;
-        });
+            // JAVI USPEH ODMAH (Ne čekaj statistiku)
+            socket.emit("balanceUpdate", finalBalance);
+            socket.emit("ticketSuccess", { msg: "Tiket uplaćen!", balance: finalBalance });
 
-        // result.committed će biti TRUE samo ako je transakcija uspješno završena sa novim balansom
-        if (!result.committed) {
-            console.log(`[UPLATA ODBIJENA] Korisnik ${userId} nema dovoljno sredstava.`);
-            return socket.emit("ticketError", "Nemaš dovoljno novca na računu!");
+            // 2. SPOREDNE STVARI (Statistika i Jackpot) - u posebnom try bloku
+            try {
+                await Promise.all([
+                    updateGlobalStats(ticketAmount, 0),
+                    db.ref("gameData/jackpot").transaction(j => (j || 0) + (ticketAmount * 0.01)),
+                    db.ref("gameData/bonusPot").transaction(b => (b || 0) + (ticketAmount * 0.01))
+                ]);
+
+                // Pošalji svima novo stanje fondova
+                const gData = await db.ref("gameData").get();
+                io.emit("liveUpdate", {
+                    jackpot: gData.val()?.jackpot || 0,
+                    bonus: gData.val()?.bonusPot || 0
+                });
+            } catch (sideErr) { console.error("Stats error:", sideErr); }
+
+        } catch (err) {
+            console.error("Kritična greška:", err);
+            if (!moneyDeducted) socket.emit("ticketError", "Greška na serveru.");
         }
-
-        moneyDeducted = true;
-        const finalBalance = result.snapshot.val();
-
-        // 2. Upiši tiket
-        const newTicketRef = db.ref(`tickets`).push();
-        await newTicketRef.set({
-            userId: userId,
-            numbers: numbers,
-            amount: ticketAmount,
-            roundId: roundId,
-            status: "pending",
-            createdAt: Date.now()
-        });
-
-        // 3. Ažuriraj statistiku i fondove paralelno
-        await Promise.all([
-            updateGlobalStats(ticketAmount, 0),
-            db.ref("gameData/jackpot").transaction(j => (j || 0) + (ticketAmount * 0.01)),
-            db.ref("gameData/bonusPot").transaction(b => (b || 0) + (ticketAmount * 0.01))
-        ]);
-
-        // Slanje ažuriranja
-        socket.emit("balanceUpdate", finalBalance);
-        socket.emit("ticketSuccess", { msg: "Tiket uspešno uplaćen!", balance: finalBalance });
-        
-        // Slanje liveUpdate-a (da se jackpot/bonus odmah osveže bez čitanja baze)
-        const gameDataSnap = await db.ref("gameData").get();
-        io.emit("liveUpdate", {
-            jackpot: gameDataSnap.val()?.jackpot || 0,
-            bonus: gameDataSnap.val()?.bonusPot || 0
-        });
-
-    } catch (err) {
-        console.error("KRITIČNA GREŠKA:", err);
-        if (moneyDeducted) {
-            socket.emit("ticketError", "Sistem je uzeo uplatu ali je došlo do greške pri upisu. Kontaktirajte admina.");
-        } else {
-            socket.emit("ticketError", "Serverska greška. Pokušajte ponovo.");
-        }
-    }
-});
-    // 2. DODAJ OVO: Slušalac za promenu taba (Visibility API sinhronizacija)
-    socket.on("requestSync", () => {
-        console.log(`[SYNC] Korisnik osvežava tab za kolo ${currentRoundId}`);
-        socket.emit("initialState", {
-            roundId: currentRoundId,
-            status: currentRoundStatus,
-            timeLeft: countdown,
-            history: roundHistory,
-            drawnNumbers: currentRoundStatus === "waiting" ? lastRoundNumbers : drawnNumbers
-        });
     });
-
 });
 
 const PORT = process.env.PORT || 3000;
