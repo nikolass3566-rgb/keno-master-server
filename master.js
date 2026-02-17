@@ -23,6 +23,7 @@ let currentRoundStatus = "waiting";
 let drawnNumbers = [];
 let lastRoundNumbers = []; // Za korisnike koji uđu u pauzi
 let countdown = 90;
+let roundHistory = {}; // OVO MORA BITI OVDE DEFINISANO
 
 const KENO_PAYTABLE = { 10:10000, 9:2000, 8:500, 7:100, 6:25, 5:5, 4:2, 3:0, 2:0, 1:0, 0:0 };
 const sleep = (ms) => new Promise(res => setTimeout(res, ms));
