@@ -248,7 +248,7 @@ io.on("connection", async (socket) => {
 
             // JAVI USPEH ODMAH (Ne čekaj statistiku)
             socket.emit("balanceUpdate", finalBalance);
-            socket.emit("ticketSuccess", { msg: "Tiket uplaćen!", balance: finalBalance });
+            socket.emit("ticketSuccess", { balance: finalBalance });
 
             // 2. SPOREDNE STVARI (Statistika i Jackpot) - u posebnom try bloku
             try {
@@ -369,4 +369,26 @@ async function triggerJackpotPayback(amount) {
 async function triggerBonusRound(amount) {
     console.log(`[BONUS PUKAO] Iznos: ${amount}`);
     await db.ref("gameData/bonusPot").set(0);
+}
+// master.js - DODAJ OVU FUNKCIJU NA KRAJ FAJLA
+async function updateGlobalStats(addIn, addOut) {
+    try {
+        const statsRef = db.ref("admin/stats");
+        await statsRef.transaction((current) => {
+            // Ako statistika ne postoji, inicijalizuj je
+            const stats = current || { totalIn: 0, totalOut: 0, profit: 0 };
+            
+            const newIn = (Number(stats.totalIn) || 0) + (Number(addIn) || 0);
+            const newOut = (Number(stats.totalOut) || 0) + (Number(addOut) || 0);
+            
+            return {
+                totalIn: newIn,
+                totalOut: newOut,
+                profit: newIn - newOut
+            };
+        });
+        console.log(`[STATS] Ažurirano: +${addIn} ulaz, +${addOut} izlaz.`);
+    } catch (e) {
+        console.error("Kritična greška u updateGlobalStats:", e);
+    }
 }
