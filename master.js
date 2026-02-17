@@ -206,20 +206,40 @@ function generateRandom20() {
 }
 // master.js
 
+// ==========================================
+// 2. GLAVNI SOCKET DEO (Zameni svoj io.on deo ovim)
+// ==========================================
 io.on("connection", async (socket) => {
     console.log("Klijent povezan:", socket.id);
 
-    // ODMAH pošalji trenutne vrijednosti Jackpot-a i Bonusa čim uđe na sajt
-    try {
-        const gameDataSnap = await db.ref("gameData").get();
-        if (gameDataSnap.exists()) {
-            socket.emit("liveUpdate", {
-                jackpot: gameDataSnap.val().jackpot || 0,
-                bonus: gameDataSnap.val().bonusPot || 0 // Šaljemo kao 'bonus' radi script.js
-            });
-        }
-    } catch (e) { console.log("Greška pri početnom slanju:", e); }
+    // FUNKCIJA ZA SLANJE KOMPLETNOG STANJA (Gasi loader na klijentu)
+    const sendGameState = async () => {
+        try {
+            const gameDataSnap = await db.ref("gameData").get();
+            const gData = gameDataSnap.exists() ? gameDataSnap.val() : { jackpot: 0, bonusPot: 0 };
 
+            socket.emit("gameUpdate", {
+                roundId: currentRoundId,
+                status: currentRoundStatus,
+                countdown: countdown,
+                drawnNumbers: drawnNumbers,
+                lastNumbers: lastRoundNumbers,
+                jackpot: gData.jackpot || 0,
+                bonus: gData.bonusPot || 0
+            });
+        } catch (err) {
+            console.error("Greška pri slanju početnog stanja:", err);
+        }
+    };
+
+    // 1. Pošalji podatke ODMAH pri konekciji (Ovo gasi loader pri prvom ulasku)
+    await sendGameState();
+
+    // 2. Pošalji podatke kada klijent promeni tab i zatraži osvežavanje
+    socket.on("requestSync", async () => {
+        console.log(`[SYNC] Klijent ${socket.id} traži osvežavanje podataka.`);
+        await sendGameState();
+    });
     socket.on("placeTicket", async (data) => {
         const { userId, numbers, amount, roundId } = data;
         const ticketAmount = Number(amount);
@@ -274,15 +294,6 @@ io.on("connection", async (socket) => {
 
     // master.js - UNUTAR io.on("connection")
 
-const sendGameState = () => {
-    socket.emit("gameUpdate", {
-        roundId: currentRoundId,
-        status: currentRoundStatus,
-        countdown: countdown,
-        drawnNumbers: drawnNumbers,
-        lastNumbers: lastRoundNumbers
-    });
-};
 
 // 1. Pošalji odmah pri konekciji
 sendGameState();
