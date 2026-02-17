@@ -93,6 +93,15 @@ async function runGame() {
             io.emit("ballDrawn", { number: n, allDrawn: drawnNumbers });
             await sleep(3000);
         }
+            // 1. SAČUVAJ BROJEVE U ISTORIJU PRE NEGO ŠTO POVEĆAŠ ID
+roundHistory[currentRoundId] = [...drawnNumbers]; 
+
+// 2. Opciono: Čuvaj samo zadnjih 20 kola da ne preopteretiš memoriju
+let keys = Object.keys(roundHistory);
+if (keys.length > 20) {
+    delete roundHistory[keys[0]];
+}
+
 
        // ... (kraj izvlačenja)
         currentRoundStatus = "calculating";
