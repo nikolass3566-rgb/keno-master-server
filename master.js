@@ -102,21 +102,18 @@ async function processTickets(roundId, finalNumbers) {
 }
 
 async function runGame() {
-    // 1. Inicijalizacija - Uzmi poslednji ID iz baze samo JEDNOM pri startu servera
+    // 1. Inicijalizacija pri startu servera
     const snap = await db.ref("lastRoundId").get();
     currentRoundId = snap.val() || 1000;
-
     console.log(`[START] Igra pokrenuta od kola: ${currentRoundId}`);
 
     while (true) {
         // --- FAZA ČEKANJA (WAITING) ---
-        // Na početku petlje, currentRoundId je onaj koji je upravo postavljen
         drawnNumbers = [];
         currentRoundStatus = "waiting";
 
         for (let s = 90; s >= 0; s--) {
             countdown = s;
-            // Šaljemo SVIMA informaciju o tekućem kolu za koje mogu da uplaćuju
             io.emit("roundUpdate", { 
                 roundId: currentRoundId, 
                 status: "waiting", 
@@ -125,57 +122,98 @@ async function runGame() {
             await sleep(1000);
         }
 
+        // --- FAZA PAMETNOG GENERISANJA (RTP KONTROLA) ---
+        // Generišemo brojeve pre nego što ih klijenti vide
+        console.log(`[RTP] Analiza uplata za kolo ${currentRoundId}...`);
+        const finalNumbers = await generateSmartNumbers(); // Ova funkcija bira najboljih 20 za profit
+
         // --- FAZA IZVLAČENJA (RUNNING) ---
         currentRoundStatus = "running";
         io.emit("roundUpdate", { status: "running", roundId: currentRoundId });
 
+        // Prikazujemo lopticu jednu po jednu (animacija za klijente)
         for (let i = 0; i < 20; i++) {
-            let n;
-            do { n = Math.floor(Math.random() * 80) + 1; } while (drawnNumbers.includes(n));
+            const n = finalNumbers[i];
             drawnNumbers.push(n);
             io.emit("ballDrawn", { number: n, allDrawn: drawnNumbers });
-            await sleep(3000);
+            await sleep(3000); // Pauza između loptica
         }
-            // 1. SAČUVAJ BROJEVE U ISTORIJU PRE NEGO ŠTO POVEĆAŠ ID
-roundHistory[currentRoundId] = [...drawnNumbers]; 
 
-// 2. Opciono: Čuvaj samo zadnjih 20 kola da ne preopteretiš memoriju
-let keys = Object.keys(roundHistory);
-if (keys.length > 20) {
-    delete roundHistory[keys[0]];
-}
-
-
-       // ... (kraj izvlačenja)
+        // --- FAZA OBRAČUNA (CALCULATING) ---
         currentRoundStatus = "calculating";
-        lastRoundNumbers = [...drawnNumbers]; 
-        await processTickets(currentRoundId, drawnNumbers);
         
-        // Šaljemo finalne brojeve i obaveštenje da je KRAJ
+        // 1. Sačuvaj u lokalnu istoriju (za brzi AJAX/Socket pristup)
+        roundHistory[currentRoundId] = [...drawnNumbers]; 
+        let keys = Object.keys(roundHistory);
+        if (keys.length > 20) delete roundHistory[keys[0]];
+
+        // 2. Sačuvaj u Firebase (trajna arhiva rezultata)
+        await db.ref(`rounds/${currentRoundId}`).set({
+            numbers: drawnNumbers,
+            timestamp: Date.now()
+        });
+
+        // 3. Pokreni obračun tiketa (ona sređena funkcija sa Number() zaštitom)
+        // Ovo rešava problem sa NaN i Pending statusom
+        await processTickets(currentRoundId, drawnNumbers); 
+
+        // 4. Javi klijentima da je gotovo
         io.emit("roundFinished", { 
             roundId: currentRoundId, 
             allNumbers: drawnNumbers 
         });
 
-        await sleep(10000); // 10 sekundi pauze da ljudi vide rezultate
+        await sleep(10000); // Pauza od 10s za gledanje rezultata
 
-        // KLJUČNA IZMENA: Povećavamo ID i ODMAH javljamo klijentima novo stanje
+        // --- PRIPREMA ZA NOVO KOLO ---
         currentRoundId++;
+        // Čuvamo ID u bazu da bi se restart servera nastavio odavde
         await db.ref("lastRoundId").set(currentRoundId);
-        
-        // Resetujemo parametre za novo kolo
-        drawnNumbers = [];
-        currentRoundStatus = "waiting";
-        
-        // Obaveštavamo klijente da je počelo novo čekanje sa NOVIM ID-om
-        io.emit("roundUpdate", { 
-            roundId: currentRoundId, 
-            status: "waiting", 
-            timeLeft: 90 
-        });
     }
 }
 
+/**
+ * Pomoćna funkcija za RTP kontrolu (55% - 77%)
+ */
+async function generateSmartNumbers() {
+    let bestSet = [];
+    let lowestPayout = Infinity;
+
+    // Uzmi sve uplate za trenutno kolo
+    const snapshot = await db.ref("tickets").orderByChild("roundId").equalTo(currentRoundId).once("value");
+    const tickets = snapshot.exists() ? snapshot.val() : {};
+
+    // Ako nema uplata, daj čisto nasumične brojeve
+    if (Object.keys(tickets).length === 0) return generateRandom20();
+
+    // Simuliraj 15 različitih izvlačenja i uzmi ono koje najmanje isplaćuje (RTP zaštita)
+    for (let i = 0; i < 15; i++) {
+        const candidate = generateRandom20();
+        let totalWin = 0;
+
+        for (const id in tickets) {
+            const t = tickets[id];
+            const hitCount = t.numbers.filter(n => candidate.includes(n)).length;
+            const quota = KENO_PAYTABLE[t.numbers.length]?.[hitCount] || 0;
+            totalWin += Math.floor((Number(t.amount) || 0) * quota);
+        }
+
+        if (totalWin < lowestPayout) {
+            lowestPayout = totalWin;
+            bestSet = candidate;
+        }
+    }
+    return bestSet;
+}
+
+function generateRandom20() {
+    let arr = [];
+    while (arr.length < 20) {
+        let n = Math.floor(Math.random() * 80) + 1;
+        if (!arr.includes(n)) arr.push(n);
+    }
+    return arr;
+}
 io.on("connection", (socket) => {
     // SINHRONIZACIJA: Šaljemo podatke zavisno od toga šta se trenutno dešava
     socket.emit("initialState", {
