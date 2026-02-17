@@ -150,7 +150,7 @@ async function runGame() {
         });
 
         // 5. BONUS/JACKPOT PROVERA
-        await checkSpecialPrizes(); 
+        await checkSpecialPrizes();
 
         await sleep(10000); // Pauza od 10s za gledanje rezultata
 
@@ -268,7 +268,7 @@ io.on("connection", async (socket) => {
 
             // JAVI USPEH ODMAH (Ne čekaj statistiku)
             socket.emit("balanceUpdate", finalBalance);
-          
+
 
             // 2. SPOREDNE STVARI (Statistika i Jackpot) - u posebnom try bloku
             try {
@@ -295,144 +295,17 @@ io.on("connection", async (socket) => {
     // master.js - UNUTAR io.on("connection")
 
 
-// 1. Pošalji odmah pri konekciji
-sendGameState();
-
-// 2. Pošalji kada klijent zatraži (visibility change ili refresh)
-socket.on("requestSync", () => {
-    console.log(`[SYNC] Klijent ${socket.id} traži osvežavanje podataka.`);
+    // 1. Pošalji odmah pri konekciji
     sendGameState();
-});
-});
 
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-    console.log(`Server aktivan na portu ${PORT}`);
-    runGame();
-});
-// master.js
-db.ref("tickets").on("child_added", async (snapshot) => {
-    const ticket = snapshot.val();
-    if (!ticket.roundId) {
-        // Server mu dodeljuje ID kola koje je TRENUTNO aktivno na serveru
-        await snapshot.ref.update({ roundId: currentRoundId });
-    }
-});
+    // 2. Pošalji kada klijent zatraži (visibility change ili refresh)
+    socket.on("requestSync", () => {
+        console.log(`[SYNC] Klijent ${socket.id} traži osvežavanje podataka.`);
+        sendGameState();
+    });
 
 
-async function generateSmartNumbers() {
-    // 1. Povuci statistiku iz baze
-    const statsSnap = await db.ref("admin/stats").get();
-    const stats = statsSnap.val() || { totalIn: 0, totalOut: 0, profit: 0 };
-    
-    // Izračunaj trenutni RTP (isplaćeno / uplaćeno)
-    const currentRTP = stats.totalIn > 0 ? (stats.totalOut / stats.totalIn) * 100 : 0;
-
-    let bestSet = [];
-    let lowestPayout = Infinity;
-
-    // 2. Simuliraj izvlačenja
-    for (let i = 0; i < 200; i++) { // Probaj 20 različitih kombinacija
-        let candidate = generateRandom20();
-        let potentialPayout = await calculateSimulatedPayout(candidate);
-
-        // Ako je profit nizak (RTP > 77%), forsiraj kombinaciju sa najmanjom isplatom
-        if (currentRTP > 77) {
-            if (potentialPayout < lowestPayout) {
-                lowestPayout = potentialPayout;
-                bestSet = candidate;
-            }
-        } else {
-            // Ako smo u dobrom profitu, daj bilo koju fer kombinaciju
-            return candidate; 
-        }
-    }
-    return bestSet;
-}
-// master.js
-
-async function checkSpecialPrizes() {
-    const statsSnap = await db.ref("admin/stats").get();
-    const stats = statsSnap.val() || { profit: 0 };
-    
-    const gameDataSnap = await db.ref("gameData").get();
-    const gameData = gameDataSnap.val() || { jackpot: 0, bonusPot: 0 };
-
-    // 1. JACKPOT: Puca samo ako je profit preko 100,000 RSD i jackpot preko 5,000
-    if (stats.profit > 100000 && gameData.jackpot > 5000) {
-        if (Math.random() < 0.05) { // 5% šanse svako kolo kada su uslovi ispunjeni
-            await triggerJackpotPayback(gameData.jackpot);
-        }
-    }
-
-    // 2. BONUS: Puca ako je profit preko 20,000 RSD i bonusPot prešao limit
-    if (stats.profit > 20000 && gameData.bonusPot > 10000) {
-        await triggerBonusRound(gameData.bonusPot);
-    }
-}
-
-// ================= NEDOSTAJUĆE FUNKCIJE =================
-
-async function calculateSimulatedPayout(candidateNumbers) {
-    try {
-        const snapshot = await db.ref("tickets").orderByChild("roundId").equalTo(currentRoundId).once("value");
-        if (!snapshot.exists()) return 0;
-
-        let totalPotentialWin = 0;
-        const tickets = snapshot.val();
-        
-        for (const id in tickets) {
-            const t = tickets[id];
-            const hitCount = t.numbers.filter(n => candidateNumbers.includes(n)).length;
-            const quota = KENO_PAYTABLE[t.numbers.length]?.[hitCount] || 0;
-            totalPotentialWin += Math.floor((Number(t.amount) || 0) * quota);
-        }
-        return totalPotentialWin;
-    } catch (e) { return 999999; }
-}
-
-async function triggerJackpotPayback(amount) {
-    console.log(`[JACKPOT PUKAO] Iznos: ${amount}`);
-    // Resetuj u bazi
-    await db.ref("gameData/jackpot").set(0);
-    // Ovde možeš dodati logiku da izvučeš random korisnika i daš mu pare
-}
-
-async function triggerBonusRound(amount) {
-    console.log(`[BONUS PUKAO] Iznos: ${amount}`);
-    await db.ref("gameData/bonusPot").set(0);
-}
-// master.js - DODAJ OVU FUNKCIJU NA KRAJ FAJLA
-async function updateGlobalStats(addIn, addOut) {
-    try {
-        const statsRef = db.ref("admin/stats");
-        await statsRef.transaction((current) => {
-            // Ako statistika ne postoji, inicijalizuj je
-            const stats = current || { totalIn: 0, totalOut: 0, profit: 0 };
-            
-            const newIn = (Number(stats.totalIn) || 0) + (Number(addIn) || 0);
-            const newOut = (Number(stats.totalOut) || 0) + (Number(addOut) || 0);
-            
-            return {
-                totalIn: newIn,
-                totalOut: newOut,
-                profit: newIn - newOut
-            };
-        });
-        console.log(`[STATS] Ažurirano: +${addIn} ulaz, +${addOut} izlaz.`);
-    } catch (e) {
-        console.error("Kritična greška u updateGlobalStats:", e);
-    }
-}
-
-// master.js
-
-// master.js
-
-io.on("connection", async (socket) => {
-    console.log("Povezan klijent/admin:", socket.id);
-
-    // Funkcija koja prikuplja SVE podatke i šalje ih (za sync i za admina)
+ // Funkcija koja prikuplja SVE podatke i šalje ih (za sync i za admina)
     const sendFullSync = async () => {
         try {
             // Povuci sve bitne grane iz baze odjednom
@@ -472,4 +345,134 @@ io.on("connection", async (socket) => {
         await db.ref("admin/stats").set(freshStats);
         io.emit("adminStatsUpdate", freshStats); // Javi svim adminima
     });
+
+
+
+
+
 });
+
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+    console.log(`Server aktivan na portu ${PORT}`);
+    runGame();
+});
+// master.js
+db.ref("tickets").on("child_added", async (snapshot) => {
+    const ticket = snapshot.val();
+    if (!ticket.roundId) {
+        // Server mu dodeljuje ID kola koje je TRENUTNO aktivno na serveru
+        await snapshot.ref.update({ roundId: currentRoundId });
+    }
+});
+
+
+async function generateSmartNumbers() {
+    // 1. Povuci statistiku iz baze
+    const statsSnap = await db.ref("admin/stats").get();
+    const stats = statsSnap.val() || { totalIn: 0, totalOut: 0, profit: 0 };
+
+    // Izračunaj trenutni RTP (isplaćeno / uplaćeno)
+    const currentRTP = stats.totalIn > 0 ? (stats.totalOut / stats.totalIn) * 100 : 0;
+
+    let bestSet = [];
+    let lowestPayout = Infinity;
+
+    // 2. Simuliraj izvlačenja
+    for (let i = 0; i < 200; i++) { // Probaj 20 različitih kombinacija
+        let candidate = generateRandom20();
+        let potentialPayout = await calculateSimulatedPayout(candidate);
+
+        // Ako je profit nizak (RTP > 77%), forsiraj kombinaciju sa najmanjom isplatom
+        if (currentRTP > 77) {
+            if (potentialPayout < lowestPayout) {
+                lowestPayout = potentialPayout;
+                bestSet = candidate;
+            }
+        } else {
+            // Ako smo u dobrom profitu, daj bilo koju fer kombinaciju
+            return candidate;
+        }
+    }
+    return bestSet;
+}
+// master.js
+
+async function checkSpecialPrizes() {
+    const statsSnap = await db.ref("admin/stats").get();
+    const stats = statsSnap.val() || { profit: 0 };
+
+    const gameDataSnap = await db.ref("gameData").get();
+    const gameData = gameDataSnap.val() || { jackpot: 0, bonusPot: 0 };
+
+    // 1. JACKPOT: Puca samo ako je profit preko 100,000 RSD i jackpot preko 5,000
+    if (stats.profit > 100000 && gameData.jackpot > 5000) {
+        if (Math.random() < 0.05) { // 5% šanse svako kolo kada su uslovi ispunjeni
+            await triggerJackpotPayback(gameData.jackpot);
+        }
+    }
+
+    // 2. BONUS: Puca ako je profit preko 20,000 RSD i bonusPot prešao limit
+    if (stats.profit > 20000 && gameData.bonusPot > 10000) {
+        await triggerBonusRound(gameData.bonusPot);
+    }
+}
+
+// ================= NEDOSTAJUĆE FUNKCIJE =================
+
+async function calculateSimulatedPayout(candidateNumbers) {
+    try {
+        const snapshot = await db.ref("tickets").orderByChild("roundId").equalTo(currentRoundId).once("value");
+        if (!snapshot.exists()) return 0;
+
+        let totalPotentialWin = 0;
+        const tickets = snapshot.val();
+
+        for (const id in tickets) {
+            const t = tickets[id];
+            const hitCount = t.numbers.filter(n => candidateNumbers.includes(n)).length;
+            const quota = KENO_PAYTABLE[t.numbers.length]?.[hitCount] || 0;
+            totalPotentialWin += Math.floor((Number(t.amount) || 0) * quota);
+        }
+        return totalPotentialWin;
+    } catch (e) { return 999999; }
+}
+
+async function triggerJackpotPayback(amount) {
+    console.log(`[JACKPOT PUKAO] Iznos: ${amount}`);
+    // Resetuj u bazi
+    await db.ref("gameData/jackpot").set(0);
+    // Ovde možeš dodati logiku da izvučeš random korisnika i daš mu pare
+}
+
+async function triggerBonusRound(amount) {
+    console.log(`[BONUS PUKAO] Iznos: ${amount}`);
+    await db.ref("gameData/bonusPot").set(0);
+}
+// master.js - DODAJ OVU FUNKCIJU NA KRAJ FAJLA
+async function updateGlobalStats(addIn, addOut) {
+    try {
+        const statsRef = db.ref("admin/stats");
+        await statsRef.transaction((current) => {
+            // Ako statistika ne postoji, inicijalizuj je
+            const stats = current || { totalIn: 0, totalOut: 0, profit: 0 };
+
+            const newIn = (Number(stats.totalIn) || 0) + (Number(addIn) || 0);
+            const newOut = (Number(stats.totalOut) || 0) + (Number(addOut) || 0);
+
+            return {
+                totalIn: newIn,
+                totalOut: newOut,
+                profit: newIn - newOut
+            };
+        });
+        console.log(`[STATS] Ažurirano: +${addIn} ulaz, +${addOut} izlaz.`);
+    } catch (e) {
+        console.error("Kritična greška u updateGlobalStats:", e);
+    }
+}
+
+// master.js
+
+// master.js
+
