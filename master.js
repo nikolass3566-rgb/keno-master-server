@@ -248,7 +248,7 @@ io.on("connection", async (socket) => {
 
             // JAVI USPEH ODMAH (Ne čekaj statistiku)
             socket.emit("balanceUpdate", finalBalance);
-            socket.emit("ticketSuccess", { balance: finalBalance });
+          
 
             // 2. SPOREDNE STVARI (Statistika i Jackpot) - u posebnom try bloku
             try {
