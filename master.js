@@ -224,31 +224,36 @@ io.on("connection", (socket) => {
         return socket.emit("ticketError", "Nevalidan iznos uplate!");
     }
 
-    // Varijabla koja prati da li smo skinuli novac
     let moneyDeducted = false;
 
     try {
         const userRef = db.ref(`users/${userId}/balance`);
 
-        // 1. Korišćenje transakcije za sigurno skidanje novca
-        const result = await userRef.transaction((currentBalance) => {
-            let balance = (currentBalance === null) ? 0 : Number(currentBalance);
+        const result = await userRef.transaction((currentValue) => {
+            // FIREBASE BITNO: Ako je currentValue null, transakcija se inicijalizuje.
+            // Ne smijemo prekinuti (return), nego dozvoliti bazi da nam "javi" pravu vrijednost.
+            if (currentValue === null) {
+                return 0; 
+            }
+
+            let balance = Number(currentValue);
             if (balance < ticketAmount) {
-                return; // Prekida transakciju ako nema dovoljno para
+                // Tek ovdje prekidamo ako stvarno nema para
+                return; 
             }
             return balance - ticketAmount;
         });
 
-        // Provera da li je transakcija uspela
+        // result.committed će biti TRUE samo ako je transakcija uspješno završena sa novim balansom
         if (!result.committed) {
-            return socket.emit("ticketError", "Nemaš dovoljno novca ili je greška u nalogu!");
+            console.log(`[UPLATA ODBIJENA] Korisnik ${userId} nema dovoljno sredstava.`);
+            return socket.emit("ticketError", "Nemaš dovoljno novca na računu!");
         }
 
-        // AKO SMO OVDE - NOVAC JE SKINUT
         moneyDeducted = true;
         const finalBalance = result.snapshot.val();
 
-        // 2. Upiši tiket (Koristimo await da budemo sigurni da je upisano)
+        // 2. Upiši tiket
         const newTicketRef = db.ref(`tickets`).push();
         await newTicketRef.set({
             userId: userId,
@@ -259,36 +264,33 @@ io.on("connection", (socket) => {
             createdAt: Date.now()
         });
 
-        // 3. Ažuriraj statistiku i fondove (Jackpot/Bonus) istovremeno
-        // Koristimo Promise.all da ubrzamo proces
+        // 3. Ažuriraj statistiku i fondove paralelno
         await Promise.all([
             updateGlobalStats(ticketAmount, 0),
             db.ref("gameData/jackpot").transaction(j => (j || 0) + (ticketAmount * 0.01)),
             db.ref("gameData/bonusPot").transaction(b => (b || 0) + (ticketAmount * 0.01))
         ]);
 
-        // 4. JAVI USPEH - Ovo je ključno!
+        // Slanje ažuriranja
         socket.emit("balanceUpdate", finalBalance);
-        socket.emit("ticketSuccess", { 
-            msg: "Tiket uspešno uplaćen!", 
-            balance: finalBalance 
+        socket.emit("ticketSuccess", { msg: "Tiket uspešno uplaćen!", balance: finalBalance });
+        
+        // Slanje liveUpdate-a (da se jackpot/bonus odmah osveže bez čitanja baze)
+        const gameDataSnap = await db.ref("gameData").get();
+        io.emit("liveUpdate", {
+            jackpot: gameDataSnap.val()?.jackpot || 0,
+            bonus: gameDataSnap.val()?.bonusPot || 0
         });
 
-        console.log(`[UPLATA SUCCESS] Korisnik ${userId}: -${ticketAmount} RSD. Novo stanje: ${finalBalance}`);
-
     } catch (err) {
-        console.error("Kritična greška pri uplati:", err);
-        
-        // Pametna poruka o grešci
+        console.error("KRITIČNA GREŠKA:", err);
         if (moneyDeducted) {
-            // Ako je novac skinut, a nešto drugo je puklo, ne plašimo korisnika da pare nisu skinute
-            socket.emit("ticketError", "Tiket je uplaćen, ali postoji problem sa prikazom. Osvežite stranicu.");
+            socket.emit("ticketError", "Sistem je uzeo uplatu ali je došlo do greške pri upisu. Kontaktirajte admina.");
         } else {
-            socket.emit("ticketError", "Greška na serveru. Novac nije skinut.");
+            socket.emit("ticketError", "Serverska greška. Pokušajte ponovo.");
         }
     }
 });
-
     // 2. DODAJ OVO: Slušalac za promenu taba (Visibility API sinhronizacija)
     socket.on("requestSync", () => {
         console.log(`[SYNC] Korisnik osvežava tab za kolo ${currentRoundId}`);
