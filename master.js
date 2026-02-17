@@ -43,9 +43,12 @@ const KENO_PAYTABLE = {
 const sleep = (ms) => new Promise(res => setTimeout(res, ms));
 
 // OBRAČUN DOBITAKA
+// master.js - ISPRAVLJEN OBRAČUN TIKETA
 async function processTickets(roundId, finalNumbers) {
-    let roundTotalWin = 0; // Pratimo koliko isplaćujemo u ovom kolu
+    let roundIn = 0;
+    let roundOut = 0;
     console.log(`[OBRAČUN] Kolo: ${roundId}`);
+
     try {
         const snapshot = await db.ref("tickets").orderByChild("roundId").equalTo(roundId).once("value");
         if (!snapshot.exists()) {
@@ -54,72 +57,37 @@ async function processTickets(roundId, finalNumbers) {
         }
 
         const tickets = snapshot.val();
-        const updates = {}; // Koristimo multi-update za veću brzinu
 
         for (const id in tickets) {
             const t = tickets[id];
+            const stake = Number(t.amount) || 0;
+            roundIn += stake; // Dodajemo uplaćen novac u statistiku
 
-            // 1. Broj odigranih i broj pogođenih brojeva
-            const totalPlayed = t.numbers.length;
             const hitsArray = t.numbers.filter(n => finalNumbers.includes(n));
             const hitCount = hitsArray.length;
-
-            // 2. NOVA LOGIKA KVOTE: KENO_PAYTABLE[koliko_je_igrao][koliko_je_pogodio]
-            let quota = 0;
-            if (KENO_PAYTABLE[totalPlayed] && KENO_PAYTABLE[totalPlayed][hitCount] !== undefined) {
-                quota = KENO_PAYTABLE[totalPlayed][hitCount];
-            }
-
-            // 3. Računanje uz Number() konverziju da izbegnemo NaN
-            const stake = Number(t.amount) || 0;
+            const quota = KENO_PAYTABLE[t.numbers.length]?.[hitCount] || 0;
             const winAmount = Math.floor(stake * quota);
 
-            // Sigurnosni check pre upisa u bazu
-            if (isNaN(winAmount)) {
-                console.error(`[CRITICAL] NaN detektovan za tiket ${id}! Iznos: ${t.amount}, Kvota: ${quota}`);
-                continue; // Preskoči ovaj tiket da ne srušiš ceo obračun
+            if (winAmount > 0) {
+                roundOut += winAmount; // Dodajemo isplaćen novac
+                console.log(`[ISPLATA] Korisnik ${t.userId} dobio ${winAmount} RSD`);
+                await db.ref(`users/${t.userId}/balance`).transaction(bal => (Number(bal) || 0) + winAmount);
             }
 
-            const status = winAmount > 0 ? "win" : "lose";
-
-            // 4. Update tiketa
+            // Ažuriramo tiket u bazi
             await db.ref(`tickets/${id}`).update({
-                status: status,
+                status: winAmount > 0 ? "win" : "lose",
                 winAmount: winAmount,
                 hits: hitsArray
             });
-
-            // 5. Isplata korisniku
-            if (winAmount > 0) {
-                roundTotalWin += winAmount;
-                console.log(`[ISPLATA] Korisnik ${t.userId} dobio ${winAmount} RSD na kolu ${roundId}`);
-                await db.ref(`users/${t.userId}/balance`).transaction(currentBalance => {
-                    return (Number(currentBalance) || 0) + winAmount;
-                });
-            }
-           
         }
-         // Na kraju funkcije upiši koliko je ukupno otišlo iz kase
-    if (roundTotalWin > 0) {
-        await updateGlobalStats(0, roundTotalWin); // Dodajemo u "totalOut"
-    }
+
+        // Ažuriramo globalni RTP jednom na kraju kola
+        await updateGlobalStats(roundIn, roundOut);
+
     } catch (e) {
         console.error("Kritična greška u obračunu:", e);
     }
-    let roundIn = 0;
-    let roundOut = 0;
-
-    for (const id in tickets) {
-        const t = tickets[id];
-        roundIn += Number(t.amount); // Sabiramo uplate
-
-        if (winAmount > 0) {
-            roundOut += winAmount; // Sabiramo isplate
-        }
-    }
-
-    // Ažuriraj admin statistiku u bazi
-    await updateGlobalStats(roundIn, roundOut);
 }
 
 async function runGame() {
@@ -144,38 +112,35 @@ async function runGame() {
         }
 
         // --- FAZA PAMETNOG GENERISANJA (RTP KONTROLA) ---
-        // Generišemo brojeve pre nego što ih klijenti vide
         console.log(`[RTP] Analiza uplata za kolo ${currentRoundId}...`);
-        const finalNumbers = await generateSmartNumbers(); // Ova funkcija bira najboljih 20 za profit
+        const finalNumbers = await generateSmartNumbers();
 
         // --- FAZA IZVLAČENJA (RUNNING) ---
         currentRoundStatus = "running";
         io.emit("roundUpdate", { status: "running", roundId: currentRoundId });
 
-        // Prikazujemo lopticu jednu po jednu (animacija za klijente)
         for (let i = 0; i < 20; i++) {
             const n = finalNumbers[i];
             drawnNumbers.push(n);
             io.emit("ballDrawn", { number: n, allDrawn: drawnNumbers });
-            await sleep(3000); // Pauza između loptica
+            await sleep(3000);
         }
 
         // --- FAZA OBRAČUNA (CALCULATING) ---
         currentRoundStatus = "calculating";
 
-        // 1. Sačuvaj u lokalnu istoriju (za brzi AJAX/Socket pristup)
+        // 1. Sačuvaj u lokalnu istoriju
         roundHistory[currentRoundId] = [...drawnNumbers];
         let keys = Object.keys(roundHistory);
         if (keys.length > 20) delete roundHistory[keys[0]];
 
-        // 2. Sačuvaj u Firebase (trajna arhiva rezultata)
+        // 2. Sačuvaj u Firebase
         await db.ref(`rounds/${currentRoundId}`).set({
             numbers: drawnNumbers,
             timestamp: Date.now()
         });
 
-        // 3. Pokreni obračun tiketa (ona sređena funkcija sa Number() zaštitom)
-        // Ovo rešava problem sa NaN i Pending statusom
+        // 3. Pokreni obračun tiketa 
         await processTickets(currentRoundId, drawnNumbers);
 
         // 4. Javi klijentima da je gotovo
@@ -184,18 +149,18 @@ async function runGame() {
             allNumbers: drawnNumbers
         });
 
+        // 5. BONUS/JACKPOT PROVERA
+        await checkSpecialPrizes(); 
+
         await sleep(10000); // Pauza od 10s za gledanje rezultata
 
         // --- PRIPREMA ZA NOVO KOLO ---
         currentRoundId++;
-        // Čuvamo ID u bazu da bi se restart servera nastavio odavde
         await db.ref("lastRoundId").set(currentRoundId);
-    }
-    // master.js unutar runGame() petlje...
-
-await processTickets(currentRoundId, drawnNumbers); // Prvo obradi tikete
-await checkSpecialPrizes(); // Zatim vidi da li neko dobija bonus/jackpot na osnovu novog profita
+    } // <-- JEDINI KRAJ WHILE PETLJE
 }
+
+
 
 /**
  * Pomoćna funkcija za RTP kontrolu (55% - 77%)
@@ -383,4 +348,36 @@ async function checkSpecialPrizes() {
     if (stats.profit > 20000 && gameData.bonusPot > 10000) {
         await triggerBonusRound(gameData.bonusPot);
     }
+}
+
+// ================= NEDOSTAJUĆE FUNKCIJE =================
+
+async function calculateSimulatedPayout(candidateNumbers) {
+    try {
+        const snapshot = await db.ref("tickets").orderByChild("roundId").equalTo(currentRoundId).once("value");
+        if (!snapshot.exists()) return 0;
+
+        let totalPotentialWin = 0;
+        const tickets = snapshot.val();
+        
+        for (const id in tickets) {
+            const t = tickets[id];
+            const hitCount = t.numbers.filter(n => candidateNumbers.includes(n)).length;
+            const quota = KENO_PAYTABLE[t.numbers.length]?.[hitCount] || 0;
+            totalPotentialWin += Math.floor((Number(t.amount) || 0) * quota);
+        }
+        return totalPotentialWin;
+    } catch (e) { return 999999; }
+}
+
+async function triggerJackpotPayback(amount) {
+    console.log(`[JACKPOT PUKAO] Iznos: ${amount}`);
+    // Resetuj u bazi
+    await db.ref("gameData/jackpot").set(0);
+    // Ovde možeš dodati logiku da izvučeš random korisnika i daš mu pare
+}
+
+async function triggerBonusRound(amount) {
+    console.log(`[BONUS PUKAO] Iznos: ${amount}`);
+    await db.ref("gameData/bonusPot").set(0);
 }
