@@ -447,25 +447,19 @@ async function triggerBonusRound(amount) {
 async function updateGlobalStats(addIn, addOut) {
     try {
         const statsRef = db.ref("admin/stats");
-        await statsRef.transaction((current) => {
-            // Ako statistika ne postoji, inicijalizuj je
-            const stats = current || { totalIn: 0, totalOut: 0, profit: 0 };
-
-            const newIn = (Number(stats.totalIn) || 0) + (Number(addIn) || 0);
-            const newOut = (Number(stats.totalOut) || 0) + (Number(addOut) || 0);
-
-            return {
-                totalIn: newIn,
-                totalOut: newOut,
-                profit: newIn - newOut
-            };
+        
+        // Koristimo admin.database.ServerValue.increment
+        // Ovo je "atomsko" - nema čitanja pa pisanja, samo direktno dodavanje
+        await statsRef.update({
+            totalIn: admin.database.ServerValue.increment(addIn),
+            totalOut: admin.database.ServerValue.increment(addOut)
         });
-        console.log(`[STATS] Ažurirano: +${addIn} ulaz, +${addOut} izlaz.`);
+
+        console.log(`[STATS] Uspešno ažurirano: +${addIn} ulaz, +${addOut} izlaz.`);
     } catch (e) {
-        console.error("Kritična greška u updateGlobalStats:", e);
+        console.error("Greška u updateGlobalStats:", e);
     }
 }
-
 // master.js
 
 // master.js
