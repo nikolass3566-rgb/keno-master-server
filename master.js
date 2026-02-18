@@ -483,23 +483,36 @@ function getAdjacentNumbers(num) {
 // Modifikovana logika unutar generateSmartNumbers
 function generateNearMissNumbers(playerTickets, targetProfit) {
     let finalNumbers = [];
-    let allPlayerNumbers = playerTickets.flatMap(t => t.numbers);
     
+    // ISPRAVKA: Pretvaramo objekat tiketa u niz da bi flatMap radio
+    const ticketsArray = Object.values(playerTickets || {});
+    let allPlayerNumbers = ticketsArray.flatMap(t => t.numbers || []);
+    
+    // Ukloni duplikate da ne vrtimo istu petlju više puta
+    allPlayerNumbers = [...new Set(allPlayerNumbers)];
+
     // Prvo popunjavamo grid brojevima koji su "blizu" igračevih
     allPlayerNumbers.forEach(num => {
+        // 50% šanse da dodamo susedni broj ako imamo mesta
         if (Math.random() > 0.5 && finalNumbers.length < 15) { 
             let adj = getAdjacentNumbers(num);
             let randomAdj = adj[Math.floor(Math.random() * adj.length)];
+            
+            // Dodajemo samo ako taj broj NIJE jedan od onih koje igrači igraju
+            // i ako već nije u našem finalnom nizu
             if (!allPlayerNumbers.includes(randomAdj) && !finalNumbers.includes(randomAdj)) {
                 finalNumbers.push(randomAdj);
             }
         }
     });
 
-    // Ostatak do 20 brojeva popuni skroz nasumično
+    // Ostatak do 20 brojeva popuni skroz nasumično, 
+    // pazeći da ne pogodimo previše igračevih brojeva
     while (finalNumbers.length < 20) {
         let n = Math.floor(Math.random() * 80) + 1;
-        if (!finalNumbers.includes(n)) finalNumbers.push(n);
+        if (!finalNumbers.includes(n)) {
+            finalNumbers.push(n);
+        }
     }
     
     return finalNumbers;
