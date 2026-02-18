@@ -106,7 +106,8 @@ async function runGame() {
             io.emit("roundUpdate", {
                 roundId: currentRoundId,
                 status: "waiting",
-                timeLeft: s
+                timeLeft: s,
+                lastNumbers: lastRoundNumbers
             });
             await sleep(1000);
         }
