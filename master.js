@@ -148,7 +148,7 @@ async function runGame() {
             roundId: currentRoundId,
             allNumbers: drawnNumbers
         });
-
+        lastRoundNumbers = [...drawnNumbers];
         // 5. BONUS/JACKPOT PROVERA
         await checkSpecialPrizes();
 
