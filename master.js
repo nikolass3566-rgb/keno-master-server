@@ -166,36 +166,7 @@ async function runGame() {
 /**
  * Pomoćna funkcija za RTP kontrolu (55% - 77%)
  */
-async function generateSmartNumbers() {
-    let bestSet = [];
-    let lowestPayout = Infinity;
 
-    // Uzmi sve uplate za trenutno kolo
-    const snapshot = await db.ref("tickets").orderByChild("roundId").equalTo(currentRoundId).once("value");
-    const tickets = snapshot.exists() ? snapshot.val() : {};
-
-    // Ako nema uplata, daj čisto nasumične brojeve
-    if (Object.keys(tickets).length === 0) return generateRandom20();
-
-    // Simuliraj 15 različitih izvlačenja i uzmi ono koje najmanje isplaćuje (RTP zaštita)
-    for (let i = 0; i < 15; i++) {
-        const candidate = generateRandom20();
-        let totalWin = 0;
-
-        for (const id in tickets) {
-            const t = tickets[id];
-            const hitCount = t.numbers.filter(n => candidate.includes(n)).length;
-            const quota = KENO_PAYTABLE[t.numbers.length]?.[hitCount] || 0;
-            totalWin += Math.floor((Number(t.amount) || 0) * quota);
-        }
-
-        if (totalWin < lowestPayout) {
-            lowestPayout = totalWin;
-            bestSet = candidate;
-        }
-    }
-    return bestSet;
-}
 
 function generateRandom20() {
     let arr = [];
@@ -372,33 +343,61 @@ db.ref("tickets").on("child_added", async (snapshot) => {
 
 
 async function generateSmartNumbers() {
-    // 1. Povuci statistiku iz baze
+    // 1. Preuzmi trenutnu globalnu statistiku
     const statsSnap = await db.ref("admin/stats").get();
-    const stats = statsSnap.val() || { totalIn: 0, totalOut: 0, profit: 0 };
+    const stats = statsSnap.val() || { totalIn: 0, totalOut: 0, totalOut: 0 };
+    
+    // 2. Preuzmi uplate za trenutno kolo i izračunaj trenutni ulog (Current Stake)
+    const snapshot = await db.ref("tickets").orderByChild("roundId").equalTo(currentRoundId).once("value");
+    const tickets = snapshot.exists() ? snapshot.val() : {};
+    
+    let currentRoundIn = 0;
+    for (const id in tickets) {
+        currentRoundIn += (Number(tickets[id].amount) || 0);
+    }
 
-    // Izračunaj trenutni RTP (isplaćeno / uplaćeno)
-    const currentRTP = stats.totalIn > 0 ? (stats.totalOut / stats.totalIn) * 100 : 0;
+    const projectedTotalIn = (Number(stats.totalIn) || 0) + currentRoundIn;
+    const currentRTP = stats.totalIn > 0 ? (stats.totalOut / stats.totalIn) * 100 : 77; // Default sredina
 
-    let bestSet = [];
-    let lowestPayout = Infinity;
+    let bestCandidate = null;
+    let closestRTPDiff = Infinity;
 
-    // 2. Simuliraj izvlačenja
-    for (let i = 0; i < 200; i++) { // Probaj 20 različitih kombinacija
-        let candidate = generateRandom20();
-        let potentialPayout = await calculateSimulatedPayout(candidate);
+    // 3. Simulacija - tražimo kombinaciju koja "pegla" RTP u 70-85%
+    for (let i = 0; i < 500; i++) { // Povećavamo broj pokušaja za preciznost
+        const candidate = generateRandom20();
+        let potentialPayout = 0;
+        
+        // Izračunaj koliko bi ovo izvlačenje isplatilo
+        for (const id in tickets) {
+            const t = tickets[id];
+            const hitCount = t.numbers.filter(n => candidate.includes(n)).length;
+            const quota = KENO_PAYTABLE[t.numbers.length]?.[hitCount] || 0;
+            potentialPayout += Math.floor((Number(t.amount) || 0) * quota);
+        }
 
-        // Ako je profit nizak (RTP > 77%), forsiraj kombinaciju sa najmanjom isplatom
-        if (currentRTP > 77) {
-            if (potentialPayout < lowestPayout) {
-                lowestPayout = potentialPayout;
-                bestSet = candidate;
-            }
-        } else {
-            // Ako smo u dobrom profitu, daj bilo koju fer kombinaciju
+        const projectedTotalOut = (Number(stats.totalOut) || 0) + potentialPayout;
+        const projectedRTP = projectedTotalIn > 0 ? (projectedTotalOut / projectedTotalIn) * 100 : 0;
+
+        // --- STRIKTNA LOGIKA FILTRIRANJA ---
+        if (projectedRTP >= 70 && projectedRTP <= 85) {
+            // IDEALNO: Ova kombinacija drži banku u sigurnoj zoni. Šalji odmah!
             return candidate;
         }
+
+        // Ako ne nađemo idealnu, pamtimo onu koja nas najviše približava granicama
+        let diff = 0;
+        if (projectedRTP < 70) diff = 70 - projectedRTP;
+        else if (projectedRTP > 85) diff = projectedRTP - 85;
+
+        if (diff < closestRTPDiff) {
+            closestRTPDiff = diff;
+            bestCandidate = candidate;
+        }
     }
-    return bestSet;
+
+    // 4. Fallback: Ako u 500 pokušaja nismo našli idealnu, uzmi najbolju moguću
+    // (Ovo sprečava "skok" preko 85% jer će izabrati najmanju isplatu ako smo u plusu)
+    return bestCandidate || generateRandom20();
 }
 // master.js
 
