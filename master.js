@@ -37,8 +37,8 @@ const KENO_PAYTABLE = {
     6: { 0: 0, 3: 1, 4: 10, 5: 70, 6: 1500 },
     7: { 0: 0, 3: 1, 4: 4, 5: 30, 6: 300, 7: 5000 },
     8: { 0: 0, 4: 2, 5: 15, 6: 100, 7: 1000, 8: 15000 },
-    9: { 0: 0, 4: 1, 5: 8, 6: 50, 7: 400, 8: 4000, 9: 30000 },
-    10: { 0: 0, 5: 2, 6: 20, 7: 150, 8: 1200, 9: 8000, 10: 50000 }
+    9: { 0: 0, 4: 5, 5: 20, 6: 100, 7: 1000, 8: 4000, 9: 20000 },
+    10: { 0: 0, 4: 4, 5: 10, 6: 20 , 7: 80, 8: 1000, 9: 10000, 10: 50000 }
 };
 const sleep = (ms) => new Promise(res => setTimeout(res, ms));
 
@@ -101,7 +101,7 @@ async function runGame() {
         drawnNumbers = [];
         currentRoundStatus = "waiting";
 
-        for (let s = 90; s >= 0; s--) {
+        for (let s = countdown; s >= 0; s--) {
             countdown = s;
             io.emit("roundUpdate", {
                 roundId: currentRoundId,
