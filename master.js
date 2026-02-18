@@ -342,32 +342,32 @@ db.ref("tickets").on("child_added", async (snapshot) => {
 });
 
 
+// --- GLAVNA PAMETNA FUNKCIJA ---
 async function generateSmartNumbers() {
-    // 1. Preuzmi trenutnu globalnu statistiku
     const statsSnap = await db.ref("admin/stats").get();
-    const stats = statsSnap.val() || { totalIn: 0, totalOut: 0, totalOut: 0 };
+    const stats = statsSnap.val() || { totalIn: 0, totalOut: 0, profit: 0 };
     
-    // 2. Preuzmi uplate za trenutno kolo i izračunaj trenutni ulog (Current Stake)
     const snapshot = await db.ref("tickets").orderByChild("roundId").equalTo(currentRoundId).once("value");
     const tickets = snapshot.exists() ? snapshot.val() : {};
     
     let currentRoundIn = 0;
-    for (const id in tickets) {
-        currentRoundIn += (Number(tickets[id].amount) || 0);
-    }
+    for (const id in tickets) { currentRoundIn += (Number(tickets[id].amount) || 0); }
 
     const projectedTotalIn = (Number(stats.totalIn) || 0) + currentRoundIn;
-    const currentRTP = stats.totalIn > 0 ? (stats.totalOut / stats.totalIn) * 100 : 77; // Default sredina
-
+    
     let bestCandidate = null;
     let closestRTPDiff = Infinity;
+    const hasTickets = Object.keys(tickets).length > 0;
 
-    // 3. Simulacija - tražimo kombinaciju koja "pegla" RTP u 70-85%
-    for (let i = 0; i < 500; i++) { // Povećavamo broj pokušaja za preciznost
-        const candidate = generateRandom20();
+    // Simulacija (500 puta)
+    for (let i = 0; i < 500; i++) {
+        // Pola simulacija koristi "Near Miss", pola koristi čisti random
+        const candidate = (i % 2 === 0 && hasTickets) 
+            ? generateNearMissNumbers(tickets) 
+            : generateRandom20();
+            
         let potentialPayout = 0;
         
-        // Izračunaj koliko bi ovo izvlačenje isplatilo
         for (const id in tickets) {
             const t = tickets[id];
             const hitCount = t.numbers.filter(n => candidate.includes(n)).length;
@@ -378,25 +378,16 @@ async function generateSmartNumbers() {
         const projectedTotalOut = (Number(stats.totalOut) || 0) + potentialPayout;
         const projectedRTP = projectedTotalIn > 0 ? (projectedTotalOut / projectedTotalIn) * 100 : 0;
 
-        // --- STRIKTNA LOGIKA FILTRIRANJA ---
         if (projectedRTP >= 70 && projectedRTP <= 85) {
-            // IDEALNO: Ova kombinacija drži banku u sigurnoj zoni. Šalji odmah!
-            return candidate;
+            return candidate; // Našli smo savršen balans odmah
         }
 
-        // Ako ne nađemo idealnu, pamtimo onu koja nas najviše približava granicama
-        let diff = 0;
-        if (projectedRTP < 70) diff = 70 - projectedRTP;
-        else if (projectedRTP > 85) diff = projectedRTP - 85;
-
+        let diff = projectedRTP < 70 ? 70 - projectedRTP : projectedRTP - 85;
         if (diff < closestRTPDiff) {
             closestRTPDiff = diff;
             bestCandidate = candidate;
         }
     }
-
-    // 4. Fallback: Ako u 500 pokušaja nismo našli idealnu, uzmi najbolju moguću
-    // (Ovo sprečava "skok" preko 85% jer će izabrati najmanju isplatu ako smo u plusu)
     return bestCandidate || generateRandom20();
 }
 // master.js
@@ -479,3 +470,37 @@ async function updateGlobalStats(addIn, addOut) {
 
 // master.js
 
+// Funkcija koja nalazi susedne brojeve (npr. za 15 to su 14, 16, 5, 25...)
+function getAdjacentNumbers(num) {
+    let adjacent = [];
+    if (num > 1) adjacent.push(num - 1); // Broj levo
+    if (num < 80) adjacent.push(num + 1); // Broj desno
+    if (num > 10) adjacent.push(num - 10); // Broj iznad u gridu
+    if (num < 71) adjacent.push(num + 10); // Broj ispod u gridu
+    return adjacent;
+}
+
+// Modifikovana logika unutar generateSmartNumbers
+function generateNearMissNumbers(playerTickets, targetProfit) {
+    let finalNumbers = [];
+    let allPlayerNumbers = playerTickets.flatMap(t => t.numbers);
+    
+    // Prvo popunjavamo grid brojevima koji su "blizu" igračevih
+    allPlayerNumbers.forEach(num => {
+        if (Math.random() > 0.5 && finalNumbers.length < 15) { 
+            let adj = getAdjacentNumbers(num);
+            let randomAdj = adj[Math.floor(Math.random() * adj.length)];
+            if (!allPlayerNumbers.includes(randomAdj) && !finalNumbers.includes(randomAdj)) {
+                finalNumbers.push(randomAdj);
+            }
+        }
+    });
+
+    // Ostatak do 20 brojeva popuni skroz nasumično
+    while (finalNumbers.length < 20) {
+        let n = Math.floor(Math.random() * 80) + 1;
+        if (!finalNumbers.includes(n)) finalNumbers.push(n);
+    }
+    
+    return finalNumbers;
+}
