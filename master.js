@@ -101,7 +101,7 @@ async function runGame() {
         drawnNumbers = [];
         currentRoundStatus = "waiting";
 
-        for (let s = countdown; s >= 0; s--) {
+        for (let s = 90; s >= 0; s--) {
             countdown = s;
             io.emit("roundUpdate", {
                 roundId: currentRoundId,
