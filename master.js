@@ -245,7 +245,7 @@ io.on("connection", async (socket) => {
             // 2. SPOREDNE STVARI (Statistika i Jackpot) - u posebnom try bloku
             try {
                 await Promise.all([
-                    updateGlobalStats(ticketAmount, 0),
+                    //updateGlobalStats(ticketAmount, 0),
                     db.ref("gameData/jackpot").transaction(j => (j || 0) + (ticketAmount * 0.01)),
                     db.ref("gameData/bonusPot").transaction(b => (b || 0) + (ticketAmount * 0.01))
                 ]);
