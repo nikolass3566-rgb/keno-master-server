@@ -82,8 +82,9 @@ async function processTickets(roundId, finalNumbers) {
             });
         }
 
-        // Ažuriramo globalni RTP jednom na kraju kola
-        await updateGlobalStats(roundIn, roundOut);
+        // OVDE JE BITNA IZMENA: Šaljemo 0 za uplatu, a roundOut za isplatu
+    // Jer je uplata već proknjižena u momentu kupovine tiketa!
+    await updateGlobalStats(0, roundOut);
 
     } catch (e) {
         console.error("Kritična greška u obračunu:", e);
@@ -245,7 +246,7 @@ io.on("connection", async (socket) => {
             // 2. SPOREDNE STVARI (Statistika i Jackpot) - u posebnom try bloku
             try {
                 await Promise.all([
-                    //updateGlobalStats(ticketAmount, 0),
+                    updateGlobalStats(ticketAmount, 0),
                     db.ref("gameData/jackpot").transaction(j => (j || 0) + (ticketAmount * 0.01)),
                     db.ref("gameData/bonusPot").transaction(b => (b || 0) + (ticketAmount * 0.01))
                 ]);
@@ -448,16 +449,36 @@ async function updateGlobalStats(addIn, addOut) {
     try {
         const statsRef = db.ref("admin/stats");
         
-        // Koristimo admin.database.ServerValue.increment
-        // Ovo je "atomsko" - nema čitanja pa pisanja, samo direktno dodavanje
+        // 1. Ažuriraj bazu (atomski)
         await statsRef.update({
             totalIn: admin.database.ServerValue.increment(addIn),
             totalOut: admin.database.ServerValue.increment(addOut)
         });
 
-        console.log(`[STATS] Uspešno ažurirano: +${addIn} ulaz, +${addOut} izlaz.`);
+        // 2. Uzmi nove vrednosti iz baze
+        const snap = await statsRef.get();
+        const data = snap.val() || { totalIn: 0, totalOut: 0 };
+
+        // 3. Izračunaj profit i RTP
+        const totalIn = Number(data.totalIn) || 0;
+        const totalOut = Number(data.totalOut) || 0;
+        const profit = totalIn - totalOut;
+        const rtp = totalIn > 0 ? ((totalOut / totalIn) * 100).toFixed(2) : 0;
+
+        // 4. Sačuvaj profit u bazu
+        await statsRef.update({ profit: profit });
+
+        // 5. POŠALJI ADMINU ODMAH (Real-time update)
+        io.emit("adminStatsUpdate", {
+            totalIn,
+            totalOut,
+            profit,
+            rtp
+        });
+
+        console.log(`[STATS] Poslato adminu: In ${totalIn}, Out ${totalOut}`);
     } catch (e) {
-        console.error("Greška u updateGlobalStats:", e);
+        console.error("Greška u statistici:", e);
     }
 }
 // master.js
